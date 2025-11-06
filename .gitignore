@@ -1,2 +1,5 @@
 .vscode/
+.venv/
 .env
+data/qlib_data
+mlruns/

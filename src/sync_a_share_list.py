@@ -7,7 +7,7 @@
 
 用法:
   python sync_a_share_list.py
-  python sync_a_share_list.py --filter                       # 基础交易性过滤示例
+  python sync_a_share_list.py --filter                       # 基础交易性过滤示例 上市满 ~250 交易日 流通市值 >= 30 亿元
   python sync_a_share_list.py --proxy http://127.0.0.1:7890  # 通过代理请求
 
 
