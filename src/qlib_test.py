@@ -36,13 +36,13 @@ def main():
     print("rows:", len(df))
     
     print(
-        D.features(["SH000300"], ["$close"], "2005-01-01", "2030-01-01", freq="day")
+        D.features(["SH000300"], ["$close"], "2005-01-01", "2020-01-01", freq="day")
         .index.get_level_values("datetime")[[0, -1]]
     )
 
     # 3) 构造 Alpha158 数据集
     '''!!! 默认方式下载的数据集只到2020-09-24，后续数据需要自行补充'''
-    handler = Alpha158(instruments="csi300", start_time="2015-01-01", end_time="2022-12-31")
+    handler = Alpha158(instruments="csi300", start_time="2015-01-01", end_time="2020-09-24")
     dataset = DatasetH(handler=handler, segments={
         "train": ("2015-01-01", "2017-12-31"),
         "valid": ("2018-01-01", "2019-12-31"),

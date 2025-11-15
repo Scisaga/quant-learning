@@ -3,3 +3,5 @@
 .env
 data/qlib_data
 mlruns/
+logs/
+__pycache__/
