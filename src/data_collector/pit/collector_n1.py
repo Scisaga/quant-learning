@@ -25,6 +25,12 @@ import fire
 import pandas as pd
 from loguru import logger
 
+# tqdm 做“每次接口请求”的进度条；不存在时自动降级
+try:
+    from tqdm.auto import tqdm  # type: ignore
+except ImportError:  # pragma: no cover
+    tqdm = None
+
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(BASE_DIR.parent.parent))
 
@@ -33,6 +39,229 @@ from data_collector.utils import get_calendar_list  # noqa: E402
 
 FieldSpec = Dict[str, Any]
 
+# ----------------------------------------------------------------------
+# 全局调试/诊断控制
+# ----------------------------------------------------------------------
+
+# 是否保存 baostock 接口返回的原始数据到 tmp 目录（文本格式）
+SAVE_RAW_API_RESPONSE: bool = False
+RAW_API_TMP_DIR: Path = BASE_DIR / "tmp"
+
+# 按“单次请求”粒度的进度条
+_REQUEST_PBAR = None  # type: ignore[var-annotated]
+
+
+def _ensure_tmp_dir() -> Path:
+    RAW_API_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    return RAW_API_TMP_DIR
+
+
+def _save_raw_response(
+    fetch_name: str,
+    code: str,
+    fields: List[str],
+    rows: List[List[Any]],
+    suffix: str = "",
+) -> None:
+    """
+    将一次接口调用的原始 rows 简单写成文本文件，方便诊断“数据不全”问题。
+    每一行是逗号分隔，第一行为字段名。
+    """
+    if not SAVE_RAW_API_RESPONSE:
+        return
+    if not rows or not fields:
+        return
+
+    out_dir = _ensure_tmp_dir()
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    safe_code = code.replace(".", "_")
+    suffix_part = f"_{suffix}" if suffix else ""
+    filename = out_dir / f"{fetch_name}_{safe_code}{suffix_part}_{ts}.txt"
+
+    try:
+        with filename.open("w", encoding="utf-8") as f:
+            f.write(",".join(fields) + "\n")
+            for row in rows:
+                f.write(",".join("" if v is None else str(v) for v in row) + "\n")
+    except Exception as exc:
+        # 写文件失败不影响主流程，只打日志
+        logger.error(f"failed to save raw response to {filename}: {exc}")
+
+
+def _update_request_progress(desc: str) -> None:
+    """
+    进度条：按“单次 baostock 请求”更新，而不是按股票。
+    desc 会显示当前在跑哪个接口 / 代码 / 区间。
+    """
+    global _REQUEST_PBAR
+    if tqdm is None:
+        return
+
+    try:
+        if _REQUEST_PBAR is None:
+            _REQUEST_PBAR = tqdm(
+                total=None,
+                desc="PIT requests",
+                dynamic_ncols=True,
+            )
+        _REQUEST_PBAR.set_postfix_str(desc)
+        _REQUEST_PBAR.update(1)
+    except Exception:
+        # tqdm 自身报错也不影响主逻辑
+        pass
+
+
+# ----------------------------------------------------------------------
+# 指标定义
+# ----------------------------------------------------------------------
+
+# 盈利能力（seasonProfit）
+#   pro.roeAvg：ROE（平均）
+#   pro.npMargin：净利率
+#   pro.gpMargin：毛利率
+#   pro.netProfit：净利润（百万元）
+#   pro.epsTTM：每股收益（TTM）
+PROFIT_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "roeAvg", "field": "roeavg", "desc": "Average ROE."},
+    {"source": "npMargin", "field": "npmargin", "desc": "Net profit margin."},
+    {"source": "gpMargin", "field": "gpmargin", "desc": "Gross profit margin."},
+    {"source": "netProfit", "field": "netprofit", "desc": "Net profit (million CNY)."},
+    {"source": "epsTTM", "field": "epsttm", "desc": "TTM EPS."},
+]
+
+# 运营效率（seasonOperation）
+#   bs.query_operation_data:
+#   NRTurnRatio：应收票据及应收账款周转率
+#   NRTurnDays：应收票据及应收账款周转天数
+#   INVTurnRatio：存货周转率
+#   INVTurnDays：存货周转天数
+#   CATurnRatio：流动资产周转率
+#   AssetTurnRatio：总资产周转率
+OPERATION_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "NRTurnRatio", "field": "nrturnratio", "desc": "Notes & AR turnover ratio."},
+    {"source": "NRTurnDays", "field": "nrturndays", "desc": "Notes & AR turnover days."},
+    {"source": "INVTurnRatio", "field": "invturnratio", "desc": "Inventory turnover ratio."},
+    {"source": "INVTurnDays", "field": "invturndays", "desc": "Inventory turnover days."},
+    {"source": "CATurnRatio", "field": "caturnratio", "desc": "Current asset turnover ratio."},
+    {"source": "AssetTurnRatio", "field": "assetturnratio", "desc": "Total asset turnover ratio."},
+]
+
+# 成长能力（seasonGrowth）
+#   gr.yoyEquity：股东权益同比增速
+#   gr.yoyAsset：资产总计同比增速
+#   gr.yoyNI：归母净利润同比增速
+#   gr.yoyEPS：基本每股收益同比增速
+#   gr.yoyPNI：扣非净利润同比增速
+GROWTH_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "YOYEquity", "field": "yoyequity", "desc": "YoY equity growth."},
+    {"source": "YOYAsset", "field": "yoyasset", "desc": "YoY asset growth."},
+    {"source": "YOYNI", "field": "yoyni", "desc": "YoY net income growth."},
+    {"source": "YOYEPSBasic", "field": "yoyeps", "desc": "YoY basic EPS growth."},
+    {"source": "YOYPNI", "field": "yoypni", "desc": "YoY net income excl. non-recurring."},
+]
+
+# 资产负债（seasonBalance）
+#   bal.currentRatio：流动比率
+#   bal.quickRatio：速动比率
+#   bal.cashRatio：现金比率
+#   bal.liabilityToAsset：资产负债率
+#   bal.assetToEquity：权益乘数
+BALANCE_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "currentRatio", "field": "currentratio", "desc": "Current ratio."},
+    {"source": "quickRatio", "field": "quickratio", "desc": "Quick ratio."},
+    {"source": "cashRatio", "field": "cashratio", "desc": "Cash ratio."},
+    {"source": "liabilityToAsset", "field": "liabilitytoasset", "desc": "Debt-to-asset ratio."},
+    {"source": "assetToEquity", "field": "assettequity", "desc": "Asset-to-equity multiplier."},
+]
+
+# 现金流量能力 / 资本结构比率（seasonCashFlow）
+#   实际接口返回的是下列比率，而不是 NCFOperateA 等现金额：
+#   CAToAsset：流动资产 / 总资产
+#   NCAToAsset：非流动资产 / 总资产
+#   tangibleAssetToAsset：有形资产 / 总资产
+#   ebitToInterest：息税前利润 / 利息费用
+#   CFOToOR：经营现金流 / 营业收入
+#   CFOToNP：经营现金流 / 净利润
+#   CFOToGr：经营现金流 / 营业总收入
+CASH_FLOW_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "CAToAsset", "field": "catoasset", "desc": "Current assets / Total assets."},
+    {"source": "NCAToAsset", "field": "ncatoasset", "desc": "Non-current assets / Total assets."},
+    {"source": "tangibleAssetToAsset", "field": "tangassettoasset", "desc": "Tangible assets / Total assets."},
+    {"source": "ebitToInterest", "field": "ebittointerest", "desc": "EBIT / Interest expense."},
+    {"source": "CFOToOR", "field": "cfotoor", "desc": "Operating CF / Operating revenue."},
+    {"source": "CFOToNP", "field": "cfotonp", "desc": "Operating CF / Net profit."},
+    {"source": "CFOToGr", "field": "cfotogr", "desc": "Operating CF / Gross revenue."},
+]
+
+# 杜邦分解（seasonDupont）
+#   实际字段：
+#   dupontROE：ROE
+#   dupontAssetStoEquity：权益乘数
+#   dupontAssetTurn：资产周转率
+#   dupontPnitoni：净利润 / 利润总额
+#   dupontNitogr：净利润 / 营业总收入（净利率）
+#   dupontTaxBurden：税负
+#   dupontIntburden：利息负担
+#   dupontEbittogr：EBIT / 营业总收入（EBIT 利润率）
+DUPONT_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "dupontROE", "field": "dup_roe", "desc": "ROE from DuPont."},
+    {"source": "dupontNitogr", "field": "dup_margin", "desc": "Net profit margin."},
+    {"source": "dupontAssetTurn", "field": "dup_assetturn", "desc": "Asset turnover."},
+    {"source": "dupontAssetStoEquity", "field": "dup_leverage", "desc": "Equity multiplier."},
+    {"source": "dupontTaxBurden", "field": "dup_taxburden", "desc": "Tax burden factor."},
+    {"source": "dupontIntburden", "field": "dup_intburden", "desc": "Interest burden factor."},
+    {"source": "dupontEbittogr", "field": "dup_ebitmargin", "desc": "EBIT margin."},
+]
+
+# 业绩快报（seasonExpress）
+#   bs.query_performance_express_report:
+#   performanceExpressTotalAsset：总资产
+#   performanceExpressNetAsset：净资产
+#   performanceExpressEPSChgPct：EPS 增长率
+#   performanceExpressROEWa：ROE（加权）
+#   performanceExpressEPSDiluted：EPS（摊薄）
+#   performanceExpressGRYOY：营业总收入同比
+#   performanceExpressOPYOY：营业利润同比
+#   ※ 当前接口并没有 BPS / OP / NP 这三个字段
+EXPRESS_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "performanceExpressROEWa", "field": "ex_roewa", "desc": "Express ROE (weighted)."},
+    {"source": "performanceExpressEPSDiluted", "field": "ex_eps", "desc": "Express EPS (diluted)."},
+    {"source": "performanceExpressEPSChgPct", "field": "ex_epschg", "desc": "EPS growth rate (YoY)."},
+    {"source": "performanceExpressGRYOY", "field": "ex_gryoy", "desc": "Total revenue YoY."},
+    {"source": "performanceExpressOPYOY", "field": "ex_opyoy", "desc": "Operating profit YoY."},
+    {"source": "performanceExpressTotalAsset", "field": "ex_totalasset", "desc": "Total assets (express)."},
+    {"source": "performanceExpressNetAsset", "field": "ex_netasset", "desc": "Net assets (express)."},
+]
+
+# 业绩预告（seasonForecast）
+#   fc_rangeup/fc_rangedown：净利润同比增速上下限（预告）
+#   fc_rangemid：上下限中位值（预告）
+FORECAST_FIELD_SPECS: List[FieldSpec] = [
+    {"source": "profitForcastChgPctUp", "field": "fc_rangeup", "desc": "Forecast YoY growth upper bound."},
+    {"source": "profitForcastChgPctDwn", "field": "fc_rangedown", "desc": "Forecast YoY growth lower bound."},
+    {"source": "forecastMid", "field": "fc_rangemid", "desc": "Midpoint of YoY growth guidance."},
+]
+
+# 汇总所有指标定义，方便统一导出 / 查询
+ALL_FIELD_SPECS: List[FieldSpec] = (
+    PROFIT_FIELD_SPECS
+    + OPERATION_FIELD_SPECS
+    + GROWTH_FIELD_SPECS
+    + BALANCE_FIELD_SPECS
+    + CASH_FLOW_FIELD_SPECS
+    + DUPONT_FIELD_SPECS
+    + EXPRESS_FIELD_SPECS
+    + FORECAST_FIELD_SPECS
+)
+ALL_FIELD_NAMES: List[str] = [spec["field"] for spec in ALL_FIELD_SPECS]
+
+# 直接拼接 $$ 前缀，方便在 Notebook / 脚本中导入 D.features 用到的字段
+INDICATOR_FIELD_NAMES = [f"P($${name}_q)" for name in ALL_FIELD_NAMES]
+
+
+# ----------------------------------------------------------------------
+# 工具函数
+# ----------------------------------------------------------------------
 
 def _convert_numeric_preserve_non_numeric(
     series: pd.Series, numeric_transform: Optional[Callable[[pd.Series], pd.Series]] = None
@@ -44,20 +273,37 @@ def _convert_numeric_preserve_non_numeric(
     return numeric.where(~numeric.isna(), series)
 
 
-def _stack_indicator_fields(df: pd.DataFrame, field_specs: List[FieldSpec]) -> pd.DataFrame:
-    """Explode wide indicator columns into (date, period, field, value) rows."""
+def _stack_indicator_fields(
+    df: pd.DataFrame,
+    field_specs: List[FieldSpec],
+    context: str = "",
+) -> pd.DataFrame:
+    """将宽表的指标列展开为 (date, period, field, value) 形式。"""
+
     if df is None or df.empty:
         return pd.DataFrame()
+
+    available_cols = set(df.columns)
+    expected_sources = [spec["source"] for spec in field_specs]
+    missing = [col for col in expected_sources if col not in available_cols]
+
+    if missing:
+        ctx = f" [{context}]" if context else ""
+        logger.warning(
+            f"missing expected columns{ctx}: {missing}; "
+            f"available={sorted(available_cols)}"
+        )
 
     frames: List[pd.DataFrame] = []
     for spec in field_specs:
         column = spec["source"]
-        if column not in df.columns:
+        if column not in available_cols:
             continue
 
         series = df[column]
         convert_numeric = spec.get("convert_numeric", True)
         transform = spec.get("numeric_transform")
+
         if convert_numeric:
             series = _convert_numeric_preserve_non_numeric(series, transform)
         elif transform is not None:
@@ -114,7 +360,13 @@ def _finalize_temporal_columns(
 def _query_quarterly_dataframe(
     fetch_fn: Callable[..., Any], code: str, start_date: str, end_date: str
 ) -> pd.DataFrame:
-    """Fetch paginated quarterly data and keep rows within publish-date range."""
+    """
+    按季度拉取 baostock 数据，并根据发布日期过滤在 [start_date, end_date] 内的记录。
+
+    这里是“单次请求粒度”的核心：
+    - 每个 (year, quarter) 调用一次 fetch_fn，并更新一次进度条；
+    - 同时可选地将该季度全部原始 rows 落盘到 tmp 目录。
+    """
     start_dt = pd.Timestamp(start_date)
     end_dt = pd.Timestamp(end_date)
     start_year = start_dt.year - 1
@@ -125,23 +377,46 @@ def _query_quarterly_dataframe(
     fields: Optional[List[str]] = None
 
     for year, quarter in quarters:
+        _update_request_progress(f"{fetch_fn.__name__} {code} {year}Q{quarter}")
+
         resp = fetch_fn(code=code, year=year, quarter=quarter)
         if resp.error_code != "0":
             logger.warning(f"{fetch_fn.__name__}({code}, {year}Q{quarter}) error: {resp.error_msg}")
             continue
 
         fields = resp.fields
+        quarter_raw_rows: List[List[str]] = []
+
+        pubdate_idx: Optional[int] = None
+        if "pubDate" in resp.fields:
+            pubdate_idx = resp.fields.index("pubDate")
+
         while resp.next():
             row = resp.get_row_data()
             if not row:
                 continue
-            if "pubDate" in resp.fields:
-                pub_date_raw = row[resp.fields.index("pubDate")]
+
+            # 原始 rows（不做过滤，用于诊断保存）
+            quarter_raw_rows.append(row)
+
+            # 发布日过滤
+            if pubdate_idx is not None:
+                pub_date_raw = row[pubdate_idx]
                 if pub_date_raw:
                     pub_ts = pd.to_datetime(pub_date_raw, errors="coerce")
                     if pd.isna(pub_ts) or not (start_dt <= pub_ts <= end_dt):
                         continue
+
             records.append(row)
+
+        if quarter_raw_rows and fields:
+            _save_raw_response(
+                fetch_fn.__name__,
+                code,
+                fields,
+                quarter_raw_rows,
+                suffix=f"{year}Q{quarter}",
+            )
 
     if not records or fields is None:
         return pd.DataFrame()
@@ -150,110 +425,9 @@ def _query_quarterly_dataframe(
     return _finalize_temporal_columns(df)
 
 
-# 盈利能力（seasonProfit）
-#   pro.roeAvg：ROE（平均）
-#   pro.npMargin：净利率
-#   pro.gpMargin：毛利率
-#   pro.netProfit：净利润（百万元）
-#   pro.epsTTM：每股收益（TTM）
-PROFIT_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "roeAvg", "field": "pro_roeavg", "desc": "Average ROE."},
-    {"source": "npMargin", "field": "pro_npmargin", "desc": "Net profit margin."},
-    {"source": "gpMargin", "field": "pro_gpmargin", "desc": "Gross profit margin."},
-    {"source": "netProfit", "field": "pro_netprofit", "desc": "Net profit (million CNY)."},
-    {"source": "epsTTM", "field": "pro_epsttm", "desc": "TTM EPS."},
-]
-
-# 运营效率（seasonOperation）
-#   op.nrTurn：应收票据及应收账款周转率
-#   op.inventoryTurn：存货周转率
-#   op.arTurn：应收账款周转率
-OPERATION_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "NRTurnRate", "field": "op_nrturn", "desc": "Notes & AR turnover."},
-    {"source": "inventoryTurn", "field": "op_inventoryturn", "desc": "Inventory turnover."},
-    {"source": "ARTurn", "field": "op_arturn", "desc": "Accounts receivable turnover."},
-]
-
-# 成长能力（seasonGrowth）
-#   gr.yoyEquity：股东权益同比增速
-#   gr.yoyAsset：资产总计同比增速
-#   gr.yoyNI：归母净利润同比增速
-#   gr.yoyEPS：基本每股收益同比增速
-#   gr.yoyPNI：扣非净利润同比增速
-GROWTH_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "YOYEquity", "field": "gr_yoyequity", "desc": "YoY equity growth."},
-    {"source": "YOYAsset", "field": "gr_yoyasset", "desc": "YoY asset growth."},
-    {"source": "YOYNI", "field": "gr_yoyni", "desc": "YoY net income growth."},
-    {"source": "YOYEPSBasic", "field": "gr_yoyeps", "desc": "YoY basic EPS growth."},
-    {"source": "YOYPNI", "field": "gr_yoypni", "desc": "YoY net income excl. non-recurring."},
-]
-
-# 资产负债（seasonBalance）
-#   bal.currentRatio：流动比率
-#   bal.quickRatio：速动比率
-#   bal.cashRatio：现金比率
-#   bal.liabilityToAsset：资产负债率
-#   bal.assetToEquity：权益乘数
-BALANCE_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "currentRatio", "field": "bal_currentratio", "desc": "Current ratio."},
-    {"source": "quickRatio", "field": "bal_quickratio", "desc": "Quick ratio."},
-    {"source": "cashRatio", "field": "bal_cashratio", "desc": "Cash ratio."},
-    {"source": "liabilityToAsset", "field": "bal_liabilitytoasset", "desc": "Debt-to-asset ratio."},
-    {"source": "assetToEquity", "field": "bal_assettoequity", "desc": "Asset-to-equity multiplier."},
-]
-
-# 现金流量（seasonCashFlow）
-#   cf.cfo：经营活动现金流量净额
-#   cf.cfi：投资活动现金流量净额
-#   cf.cff：筹资活动现金流量净额
-#   cf.netChange：现金及现金等价物净增加额
-#   cf.freeCashFlow：自由现金流
-CASH_FLOW_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "NCFOperateA", "field": "cf_cfo", "desc": "Net cash from operations."},
-    {"source": "NCFFrInvestA", "field": "cf_cfi", "desc": "Net cash from investing."},
-    {"source": "NCFFrFinanA", "field": "cf_cff", "desc": "Net cash from financing."},
-    {"source": "NChangeInCash", "field": "cf_netchange", "desc": "Net change in cash."},
-    {"source": "FCF", "field": "cf_freecashflow", "desc": "Free cash flow."},
-]
-
-# 杜邦分解（seasonDupont）
-#   dup.roe：ROE
-#   dup.margin：净利率
-#   dup.assetTurn：资产周转率
-#   dup.leverage：权益乘数
-#   dup.taxBurden / dup.intBurden：税负/利息负担
-DUPONT_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "dupontROE", "field": "dup_roe", "desc": "ROE from DuPont."},
-    {"source": "dupontOperaMargin", "field": "dup_margin", "desc": "Operating profit margin."},
-    {"source": "dupontAssetTurn", "field": "dup_assetturn", "desc": "Asset turnover."},
-    {"source": "dupontAssetStoEquity", "field": "dup_leverage", "desc": "Equity multiplier."},
-    {"source": "dupontTaxBurden", "field": "dup_taxburden", "desc": "Tax burden factor."},
-    {"source": "dupontIntburden", "field": "dup_intburden", "desc": "Interest burden factor."},
-]
-
-# 业绩快报（seasonExpress）
-#   ex.roeWa：加权 ROE（快报）
-#   ex.eps：稀释每股收益
-#   ex.bps：每股净资产
-#   ex.opIncome：营业收入
-#   ex.netProfit：净利润
-EXPRESS_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "performanceExpressROEWa", "field": "ex_roewa", "desc": "Express ROE (weighted)."},
-    {"source": "performanceExpressEPSDiluted", "field": "ex_eps", "desc": "Express EPS (diluted)."},
-    {"source": "performanceExpressBPS", "field": "ex_bps", "desc": "Express BPS."},
-    {"source": "performanceExpressOP", "field": "ex_opincome", "desc": "Express operating income."},
-    {"source": "performanceExpressNP", "field": "ex_netprofit", "desc": "Express net profit."},
-]
-
-# 业绩预告（seasonForecast）
-#   fc_rangeup/fc_rangedown：净利润同比增速上下限（预告）
-#   fc_rangemid：上下限中位值（预告）
-FORECAST_FIELD_SPECS: List[FieldSpec] = [
-    {"source": "profitForcastChgPctUp", "field": "fc_rangeup", "desc": "Forecast YoY growth upper bound."},
-    {"source": "profitForcastChgPctDwn", "field": "fc_rangedown", "desc": "Forecast YoY growth lower bound."},
-    {"source": "forecastMid", "field": "fc_rangemid", "desc": "Midpoint of YoY growth guidance."},
-]
-
+# ----------------------------------------------------------------------
+# Collector / Normalize / Runner
+# ----------------------------------------------------------------------
 
 class PitCollectorN1(BaseCollector):
     DEFAULT_START_DATETIME_QUARTERLY = pd.Timestamp("2000-01-01")
@@ -331,50 +505,88 @@ class PitCollectorN1(BaseCollector):
 
     def _collect_profitability(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_profit_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, PROFIT_FIELD_SPECS)
+        return _stack_indicator_fields(df, PROFIT_FIELD_SPECS, context=f"{code}-profit")
 
     def _collect_operation(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_operation_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, OPERATION_FIELD_SPECS)
+        return _stack_indicator_fields(df, OPERATION_FIELD_SPECS, context=f"{code}-operation")
 
     def _collect_growth(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_growth_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, GROWTH_FIELD_SPECS)
+        return _stack_indicator_fields(df, GROWTH_FIELD_SPECS, context=f"{code}-growth")
 
     def _collect_balance(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_balance_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, BALANCE_FIELD_SPECS)
+        return _stack_indicator_fields(df, BALANCE_FIELD_SPECS, context=f"{code}-balance")
 
     def _collect_cash_flow(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_cash_flow_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, CASH_FLOW_FIELD_SPECS)
+        return _stack_indicator_fields(df, CASH_FLOW_FIELD_SPECS, context=f"{code}-cashflow")
 
     def _collect_dupont(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = _query_quarterly_dataframe(bs.query_dupont_data, code, start_date, end_date)
-        return _stack_indicator_fields(df, DUPONT_FIELD_SPECS)
+        return _stack_indicator_fields(df, DUPONT_FIELD_SPECS, context=f"{code}-dupont")
 
     def _collect_express(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        _update_request_progress(f"query_performance_express_report {code} {start_date}~{end_date}")
+
         resp = bs.query_performance_express_report(code=code, start_date=start_date, end_date=end_date)
-        rows = []
+        if resp.error_code != "0":
+            logger.warning(
+                f"query_performance_express_report({code}, {start_date}, {end_date}) error: {resp.error_msg}"
+            )
+            return pd.DataFrame()
+
+        rows: List[List[str]] = []
         while resp.error_code == "0" and resp.next():
             rows.append(resp.get_row_data())
+
         if not rows:
+            logger.info(f"no performance express report data for {code} between {start_date} and {end_date}")
             return pd.DataFrame()
+
+        _save_raw_response(
+            "query_performance_express_report",
+            code,
+            resp.fields,
+            rows,
+            suffix=f"{start_date}_{end_date}",
+        )
+
         df = pd.DataFrame(rows, columns=resp.fields)
         df = _finalize_temporal_columns(
             df,
             date_candidates=["performanceExpPubDate", "pubDate", "date"],
             period_candidates=["performanceExpStatDate", "statDate", "period"],
         )
-        return _stack_indicator_fields(df, EXPRESS_FIELD_SPECS)
+        return _stack_indicator_fields(df, EXPRESS_FIELD_SPECS, context=f"{code}-express")
 
     def _collect_forecast(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        _update_request_progress(f"query_forecast_report {code} {start_date}~{end_date}")
+
         resp = bs.query_forecast_report(code=code, start_date=start_date, end_date=end_date)
-        rows = []
+        if resp.error_code != "0":
+            logger.warning(
+                f"query_forecast_report({code}, {start_date}, {end_date}) error: {resp.error_msg}"
+            )
+            return pd.DataFrame()
+
+        rows: List[List[str]] = []
         while resp.error_code == "0" and resp.next():
             rows.append(resp.get_row_data())
+
         if not rows:
+            logger.info(f"no forecast report data for {code} between {start_date} and {end_date}")
             return pd.DataFrame()
+
+        _save_raw_response(
+            "query_forecast_report",
+            code,
+            resp.fields,
+            rows,
+            suffix=f"{start_date}_{end_date}",
+        )
+
         df = pd.DataFrame(rows, columns=resp.fields)
         df = _finalize_temporal_columns(
             df,
@@ -385,7 +597,7 @@ class PitCollectorN1(BaseCollector):
             up = pd.to_numeric(df["profitForcastChgPctUp"], errors="coerce")
             down = pd.to_numeric(df["profitForcastChgPctDwn"], errors="coerce")
             df["forecastMid"] = ((up + down) / 2).where(~(up.isna() | down.isna()))
-        return _stack_indicator_fields(df, FORECAST_FIELD_SPECS)
+        return _stack_indicator_fields(df, FORECAST_FIELD_SPECS, context=f"{code}-forecast")
 
     def get_data(
         self,
@@ -449,13 +661,33 @@ class PitNormalizeN1(BaseNormalize):
         df["date"] = df["date"].fillna(inferred_dates)
 
         df["period"] = period_ts.apply(
-            lambda x: x.year if self.interval == PitCollectorN1.INTERVAL_ANNUAL else x.year * 100 + (x.month - 1) // 3 + 1
+            lambda x: x.year
+            if self.interval == PitCollectorN1.INTERVAL_ANNUAL
+            else x.year * 100 + (x.month - 1) // 3 + 1
             if pd.notna(x)
             else None
         )
         return df
 
     def _get_calendar_list(self) -> Iterable[pd.Timestamp]:
+        """优先从本地 qlib calendar 读取，fallback 到网络接口。"""
+
+        local_calendar = (
+            BASE_DIR.parent.parent.parent
+            / "data"
+            / "qlib_data"
+            / "cn_data"
+            / "calendars"
+            / "day.txt"
+        )
+        if local_calendar.exists():
+            dates = pd.read_csv(local_calendar, header=None, names=["date"], dtype=str)["date"]
+            dates = pd.to_datetime(dates, errors="coerce").dropna().tolist()
+            if dates:
+                return dates
+            logger.warning("local calendar file exists but empty or invalid, fallback to remote calendar")
+        else:
+            logger.info(f"local calendar file not found: {local_calendar}, fallback to remote calendar")
         return get_calendar_list()
 
 
@@ -494,3 +726,9 @@ if __name__ == "__main__":
         fire.Fire(Run)
     finally:
         bs.logout()
+        # 收尾进度条
+        if _REQUEST_PBAR is not None:
+            try:
+                _REQUEST_PBAR.close()
+            except Exception:
+                pass

@@ -2,6 +2,7 @@
 .venv/
 .env
 data/qlib_data
+data/stock_data
 mlruns/
 logs/
 __pycache__/
