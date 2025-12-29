@@ -104,6 +104,11 @@ ExperimentManager
     └── Recorder: "当前运行"
 ```
 
+### 使用 mlruns 查看记录
+```
+mlflow ui --backend-store-uri notebooks/mlruns --port 5000 
+```
+
 ### 核心操作
 
 ```python

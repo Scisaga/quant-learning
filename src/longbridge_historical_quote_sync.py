@@ -13,7 +13,10 @@ resp = ctx.quote(["600036.SH"])
 
 print(resp)
 
-df = pd.read_csv("data/a_share_list_filtered_20251021.csv")
-symbols = df["symbol"].head(10).tolist()  # 取前10个测通路
+ctx = QuoteContext(config)
+print(ctx.static_info(["700.HK"]))
 
-print(symbols)
+#df = pd.read_csv("data/a_share_list_filtered_20251021.csv")
+#symbols = df["symbol"].head(10).tolist()  # 取前10个测通路
+
+#print(symbols)
