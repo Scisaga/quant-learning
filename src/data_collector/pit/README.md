@@ -44,7 +44,9 @@ python dump_pit.py dump --data_path ~/.qlib/stock_data/source/pit_normalized --q
 
 ```bash
 # 下载
-python src/data_collector/pit/collector_n1.py download_data --source_dir data/stock_data/source/pit --start 2000-01-01 --end 2020-01-01 --interval quarterly --symbol_regex '^(600519|000725).*'
+python src/data_collector/pit/collector_n1.py download_data --source_dir data/stock_data/source/pit --start 2007-01-01 --end 2025-11-20 --interval quarterly
+
+python src/data_collector/pit/collector_n1.py download_data --source_dir data/stock_data/source/pit --start 2007-01-01 --end 2025-11-20 --interval quarterly --symbol_regex '^(600519|000725).*'
 
 # 时间维度标准化 按照季度
 python src/data_collector/pit/collector_n1.py normalize_data --interval quarterly --source_dir data/stock_data/source/pit --normalize_dir data/stock_data/source/pit_normalized

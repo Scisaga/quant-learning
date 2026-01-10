@@ -6,7 +6,7 @@ import time
 import datetime
 import importlib
 from pathlib import Path
-from typing import Type, Iterable
+from typing import Iterable, Optional, Type
 from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
@@ -38,7 +38,7 @@ class BaseCollector(abc.ABC):
         max_collector_count=2,
         delay=0,
         check_data_length: int = None,
-        limit_nums: int = None,
+        limit_nums: Optional[int] = None,
     ):
         """
 
