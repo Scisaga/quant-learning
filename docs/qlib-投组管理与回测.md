@@ -71,6 +71,19 @@ Portfolio Strategy 是 Qlib 的组合管理组件，用于基于预测分数（s
     analysis_df = pd.concat(analysis)
     pprint(analysis_df)
     ```
+  - **波动率控仓位版**（在 TopkDropout 的选股基础上，按市场波动率动态调整 `risk_degree`）：
+    ```python
+    from qlib_strategies import VolatilityControlledTopkDropoutStrategy
+
+    strategy_obj = VolatilityControlledTopkDropoutStrategy(
+        **STRATEGY_CONFIG,
+        market="SH000300",     # 用哪个市场/指数来算波动率
+        vol_window=20,         # 滚动窗口
+        target_vol=0.20,       # 目标年化波动率
+        min_risk_degree=0.10,  # 最低仓位上限（保留一定现金）
+        # max_risk_degree=0.95 # 默认为原 risk_degree，不加杠杆
+    )
+    ```
   - **高级版**（控制执行器）：
     ```python
     # ... 同上导入

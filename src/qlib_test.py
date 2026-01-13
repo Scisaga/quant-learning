@@ -18,6 +18,7 @@ from qlib.contrib.model.gbdt import LGBModel            # ← 修正导入路径
 from qlib.workflow import R
 from qlib.contrib.evaluate import risk_analysis, backtest_daily
 from qlib.contrib.strategy import TopkDropoutStrategy   # ← 官方示例路径
+from qlib_strategies import VolatilityControlledTopkDropoutStrategy
 
 def main():
     # 1) 初始化（建议显式设置 region）
@@ -81,7 +82,16 @@ def main():
         
 
         # 6) 组合策略：把预测作为 signal 交给 TopkDropoutStrategy
-        strategy = TopkDropoutStrategy(topk=50, n_drop=10, signal=pred_score)
+        # strategy = TopkDropoutStrategy(topk=50, n_drop=10, signal=pred_score)
+        strategy = VolatilityControlledTopkDropoutStrategy(
+            topk=50,
+            n_drop=10,
+            signal=pred_score,
+            market="SH000300",
+            vol_window=20,
+            target_vol=0.20,
+            min_risk_degree=0.10,
+        )
 
         # 7) 回测：费用与成交价放进 exchange_kwargs（文档示例）
         report, positions = backtest_daily(
