@@ -1,88 +1,183 @@
-## 任务管理
+﻿## 任务管理（Task Management）
+
+任务管理是 Qlib Workflow 的“批量编排层”。当你不再只跑一次 `qrun` 或一次训练脚本，而是要做：
+
+- 滚动训练/滚动回测（rolling / walk-forward）
+- 多组超参网格/对比实验
+- 多个股票池/多个 label/多个特征集合的组合实验
+- 分布式 worker 消费同一个任务池
+
+这时就需要把“单次实验的配置”抽象成 **Task**，再把 Task 放入一个 **任务池（Task Pool）**，由一个或多个 **Trainer/Worker** 去并发执行，并用 **Collector** 汇总结果。
 
 ![任务管理步骤](img/qlib-1762369488486.png)
 
-基于 Qlib 最新文档（qlib.readthedocs.io/en/latest/component/workflow.html#task-management，截至 2025 年 11 月 6 日）和 GitHub 示例（microsoft/qlib/examples/model_rolling/task_manager_rolling.py）。Task Management 是 Qlib Workflow 的扩展，用于自动化批量任务（如滚动回测、多超参对比），支持分布式训练和 Online Serving 集成。核心流程：生成 → 存储 → 训练 → 收集。笔记按流程组织，精炼关键概念、代码示例和实战要点；补充最小用法、常见坑位及价值分析。重点：依赖 MongoDB 作为任务池，适用于量化研究的任务编排。优化后结构更紧凑、逻辑清晰，突出可操作性。
+> 官方参考：Qlib 文档 [Task Management](https://qlib.readthedocs.io/en/latest/advanced/task_management.html) 与 `microsoft/qlib` 的 rolling 示例脚本。
 
-- **核心功能**：扩展 Workflow/qrun 的单任务限制，提供端到端流程：任务生成、存储、训练、收集。自动化批量实验（如不同时间段/loss/模型对比），适用于 Online Serving（如模型切换/融合）。
-- **流程解读**：任务队列系统，上游模板批量产命令（TaskGen），中游 MongoDB 池管理状态，下游 Worker 分布式消费，最后 Collector 汇总评估。状态机：WAITING → RUNNING → PART_DONE → DONE。
-- **优势**：标准化复现实验，支持分布式（多机共享 Mongo），集成 Qlib 生态。最新更新：Python 3.12+ 支持，DelayTrainer 异步优化，Ensemble 动态权重。
-- **适用场景**：滚动回测、多模型 A/B 测试、离线 → 在线闭环。
-- **示例**：GitHub examples/model_rolling/task_manager_rolling.py（LightGBM 滚动 + IC/IR 汇总）。
+---
 
-### 任务生成（Task Generating）
-- **任务定义**：dict 结构，包括 Model、Dataset、Record（评估器）和自定义组件（文档 Task Section）。
-- **生成机制**：自定义 TaskGen.generate(task: dict) → List[dict]。内置 RollingGen：按日期切片批量生成，测试时间段影响（e.g., 滚动 segments）。
-- **实用扩展**：固定模型/特征，变 segments/loss 列表产任务；多预测期用 MultiHorizonGenBase（API/源码）。
-- **关键点**：模板化批量，减少手动重复配置。
+### 1) 核心概念
 
-### 任务存储（Task Storing）
-- **配置准备**：
-  ```python
-  from qlib.config import C
-  C["mongo"] = {"task_url": "mongodb://localhost:27017/", "task_db_name": "rolling_db"}
-  ```
-- **核心工具**：TaskManager(task_pool: str)，对应 Mongo Collection。管理生命周期、并发安全（原子操作）。
-- **任务结构**（Mongo 文档）：
-  ```json
-  {
-    "def":    // pickle 序列化任务定义
-    "filter": // JSON 筛选键（去重/查询）
-    "status": "waiting" | "running" | "part_done" | "done",
-    "res":    // pickle 序列化结果
-  }
-  ```
-- **CLI 命令**：
-  - `-h`：帮助。
-  - `-t <pool> wait`：等待消费。
-  - `-t <pool> task_stat`：状态统计。
-- **常用方法**：create_task（批量插入，去重）；replace_task（替换）；list()（列池）。
-- **注意**：首次排查连接/权限/索引；状态机确保流程流转。
+- **Task（任务定义）**
+  - 一个“可执行的实验配置”（通常是 `dict`，结构与 `qrun` 的 YAML 配置接近）。
+  - 一般包含：`model`、`dataset`、`record`（记录/评估器）以及自定义字段（例如 rolling 的窗口定义）。
 
-### 任务训练（Task Training）
-- **执行入口**：run_task(task_pool, task_func=qlib.model.trainer.task_train)，消费 WAITING/PART_DONE 任务，执行 Model/Dataset/Record。
-- **关键参数**：query（筛选）、before/after_status（状态控制）、force_release（资源释放）、**kwargs（传 func）。
-- **Trainer 扩展**：
-  - Trainer.train(tasks) → list（批量训，返回 Recorder/路径）。
-  - DelayTrainer：分预处理 + 训练，支持异步。
-- **分布式实战**：
-  - 单机：多进程 run_task。
-  - 集群：多机共享 Mongo + pool（GitHub Issue 确认）。
-- **关键点**：Worker 消费模式，易水平扩展。
+- **TaskGen（任务生成器）**
+  - 负责把“模板任务（base task）”扩展成一批任务列表，例如 RollingGen 按时间滚动生成多个训练/验证/测试切片。
 
-### 任务收集（Task Collecting）
-- **准备**：qlib.init(mlruns_path) 指定实验记录目录。
-- **工具集**：
-  - Collector：汇总预测/指标成结果集（可扩展）。
-  - Group：按规则分组（e.g., 窗口统计）。
-  - Ensemble：集成（如加权融合，最新动态权重）。
-- **应用**：Rolling 对比、指标曲线、离线 → 在线闭环。
-- **关键点**：端到端评估，集成 Qlib Recorder。
+- **TaskManager（任务池/任务存储）**
+  - 管理任务的生命周期：插入、去重、领取（claim）、状态流转、释放等。
+  - 常用后端是 **MongoDB**（适合并发 worker 共享任务池）。
 
-### 最小可运行套路（落地清单）
-1. **生成任务**：定义 base_task dict，用 RollingGen.generate(base_task) → task_defs。
-2. **存储**：
-   ```python
-   from qlib.workflow.task.manage import TaskManager
-   tm = TaskManager("pool_name")
-   tm.create_task(task_defs)  // 批量插入
-   ```
-3. **训练**：
-   - CLI：`python -m qlib.workflow.task.manage -t pool_name wait`。
-   - 脚本：`run_task(task_pool="pool_name", task_func=qlib.model.trainer.task_train)`。
-   - 多机：多 Worker 共享 Mongo。
-4. **收集**：qlib.init() 后，用 Collector/Group/Ensemble 产报表/集成。
-5. **完整参考**：examples/model_rolling/task_manager_rolling.py。
+- **Trainer / Worker（任务执行者）**
+  - 从任务池领取 `WAITING` 任务，跑训练 + 产出 artifacts（通常写入 MLflow/Recorder）。
 
-### 常见坑位与排查
-- **Mongo 问题**：未配置/连接失败 → 查权限、网络、库存在；优化索引提升并发。
-- **状态异常**：卡住/未更新 → 验证 before/after_status/query；查 Worker 日志（异常退出/冲突）。
-- **重复/替换**：create_task 自动去重；用 replace_task 避免浪费。
-- **多机同步**：不一致 → 统一 Qlib 版本/数据路径/环境；参考 GitHub “回测接口”讨论。
-- **收集失败**：mlruns 未设/产物缺失 → 确认训练写 Recorder（预测/指标）。
-- **通用**：日志优先；版本兼容（PyMongo 4.x+）。
+- **Recorder（实验记录）**
+  - Qlib 用 Recorder 记录一次任务的结果：参数、指标、产物（pred、report、ic 等）。
+  - 本仓库使用 MLflow file store：`mlruns/<experiment_id>/<run_id>/...`
 
-### 小结
-- **核心优势**：模板批量标准化复现；Mongo 池支持队列/并发/扩容；Trainer/Collector 端到端，省样板代码；无缝接 Qlib Workflow/qrun/Recorder/Online Serving。
-- **场景收益**：批量/分布式实验效率翻倍，减少错误。
-- **生态扩展**：API/源码自定义；若需，可基于模型/特征定制脚本模板。
+- **Collector（结果汇总）**
+  - 汇总一批任务的指标与产物，做对比、分组统计、集成（ensemble）等。
+
+---
+
+### 2) 任务状态与并发模型
+
+典型状态机（不同版本命名略有差异）：
+
+- `WAITING`：待执行
+- `RUNNING`：已被某个 worker 领取执行
+- `PART_DONE`：阶段性完成（例如滚动任务的分段结果已写入）
+- `DONE`：任务结束（成功或失败，失败可能会有错误信息/异常栈）
+
+并发执行的关键点：
+
+- **TaskManager 的“领取任务”必须是原子操作**：保证多个 worker 不会抢到同一条任务。
+- Worker 与任务池解耦：想扩容就启动更多 worker。
+- “去重”依赖 task 的 `filter`（或等价字段）：确保同一配置不会重复插入。
+
+---
+
+### 3) 任务定义长什么样
+
+任务定义通常包含下面三块（与 `qrun` 配置一致/高度相似）：
+
+- `model`：模型类与参数（例如 `LGBModel` + LightGBM 超参）
+- `dataset`：数据集与切片（`DatasetH` + `segments={train/valid/test}`）
+- `record`：记录哪些产物与评估（`SignalRecord`、`SigAnaRecord`、`PortAnaRecord` 等）
+
+> 本仓库的单次训练脚本 `src/train/train_lgb_alpha158_pit.py` 就是一个“任务配置落地成 Python”的例子：
+> - `market/instruments`：`--market csi300`
+> - `segments`：`--train/--valid/--test`
+> - `label`：`--label-expr`
+> - 模型参数：`LGBModel` 的 `kwargs`
+> - 产物写入：`R.save_objects(trained_model=model)` + `SignalRecord.generate()`
+
+---
+
+### 4) MongoDB 任务池配置
+
+Qlib 的任务管理通常需要一个 MongoDB（单机/集群均可）。常见配置方式：
+
+```python
+from qlib.config import C
+
+C["mongo"] = {
+  "task_url": "mongodb://localhost:27017/",
+  "task_db_name": "qlib_task_db",
+}
+```
+
+- `task_url`：MongoDB 连接串
+- `task_db_name`：任务库名（一个库可以有多个 task pool/collection）
+
+> 没有 MongoDB 也能做“伪任务管理”：自己写 for-loop 批量跑 `qrun` 或训练脚本，但就没有共享任务池与并发 worker 的能力。
+
+---
+
+### 5) 最小可运行流程（推荐落地顺序）
+
+#### A. 单任务先跑通（验证数据/配置）
+
+1) 用脚本跑一次训练：
+
+```bash
+python src/train/train_lgb_alpha158_pit.py --provider-uri data/qlib_data/cn_data --market csi300 --exp-name tutorial_exp
+```
+
+2) 生成 HTML 报告（基于 Recorder/MLflow artifacts）：
+
+```bash
+python src/backtest/generate_html_report.py --exp-name tutorial_exp --recorder-id <RID>
+```
+
+你会在 `mlruns/` 看到一次 run 的完整产物（见 `docs/qlib-数据项.md`）。
+
+#### B. 把单任务模板化（base task）
+
+把上面“单次训练”的关键参数整理成一个 `base_task`：
+
+- 固定：模型类型、特征集合、label 口径
+- 可变：train/valid/test 的时间切片、股票池、超参网格
+
+#### C. 生成一批任务（rolling / grid）
+
+- Rolling：根据时间窗生成多个 `(train, valid, test)` 组合
+- Grid：根据参数列表生成多个模型超参组合
+
+#### D. 入库（TaskManager.create_task）
+
+把任务列表写入 MongoDB 的某个 pool：
+
+- 任务池名建议包含用途：例如 `rolling_lgb_alpha158_pit`
+- `filter` 字段务必包含能唯一标识配置的键（避免重复插入）
+
+#### E. 启动一个或多个 Worker 消费任务
+
+- 单机：开多个进程/多个终端
+- 多机：多台机器共用 MongoDB，同一个 pool 即可实现水平扩容
+
+#### F. 收集与对比（Collector）
+
+把多次 run 的指标汇总成表格/图：
+
+- 滚动窗：看 IC/IR 的时间序列稳定性
+- 超参对比：看收益、回撤、换手、成本敏感性
+
+---
+
+### 6) 参数与可复现（强烈建议）
+
+要让任务管理真正“可复现 + 可追溯”，建议你在每个任务/每次 run 都能回答这些问题：
+
+- 训练/验证/测试的时间段分别是什么？
+- 股票池（market/instruments）是什么？
+- 特征集合是什么（是否包含 `pit_` 财务特征）？
+- label 表达式是什么？
+- 模型超参是什么？
+- 回测配置（topk/n_drop/成本/benchmark）是什么？
+
+本仓库的实践建议：
+
+- 在训练脚本里显式打印并/或记录关键参数（`R.log_params(...)` 或写入 artifacts）。
+- 产物统一写进 Recorder（MLflow artifacts），报告脚本只读 Recorder，不依赖 notebook 状态。
+- 对 PIT 财务：优先用离线生成的 `features/<inst>/pit_*.day.bin`，避免线上读取最新财务数据导致“未来信息”。
+
+---
+
+### 7) 常见坑位
+
+- **Mongo 连接/权限问题**：任务插入失败或 worker 领取失败，优先检查 `task_url`、账号权限、collection 是否可写。
+- **任务卡在 RUNNING**：worker 异常退出但状态未回滚，通常需要 `force_release` 或手动重置状态（不同版本 API 不同）。
+- **MLflow 参数冲突**：同一个 run/resume 时写入相同 key 不同 value 会报错；报告脚本里避免用 `R.start(resume=True)`，直接 `R.get_recorder(...)` 读取。
+- **数据泄露**：rolling 任务要保证 label/特征都严格只使用当时可见的信息；财务数据务必使用 PIT。
+
+---
+
+### 8) 与本仓库内容的关联
+
+- 单次训练/写入 Recorder：`src/train/train_lgb_alpha158_pit.py`
+- 报告生成（含实验参数汇总）：`src/backtest/generate_html_report.py`
+- 数据/产物解释：`docs/qlib-数据项.md`
+- 工作流（qrun/YAML）：`docs/qlib-工作流.md`
+- 回测与投组：`docs/qlib-投组管理与回测.md`
+

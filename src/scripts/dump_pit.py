@@ -211,7 +211,8 @@ class DumpPitData:
 
             # if data already exists, continue to the next field
             if start_year > end_year:
-                logger.warning(f"{symbol}-{field} data already exists, continue to the next field")
+                # Not an actionable warning; this is expected when re-running incremental dumps.
+                # logger.debug(f"{symbol}-{field} data already exists, continue to the next field")
                 continue
 
             # dump index filled with NA

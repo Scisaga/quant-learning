@@ -51,4 +51,10 @@ python src/data_collector/pit/collector_n1.py normalize_data --interval quarterl
 
 # 导出PIT格式
 python src/scripts/dump_pit.py dump --csv_path  data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data --interval quarterly
+
+# 同时导出 PIT(financial/) + PIT->day bin(features/)（默认会尝试用接口补全；仍缺失则写全 NaN 的日频特征 bin）
+python src/data_collector/pit/collector_n1.py dump_qlib --normalize_dir data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data
+
+# 如需“缺失则自动调接口补全”，显式开启（否则不会发起接口请求）：
+python src/data_collector/pit/collector_n1.py dump_qlib --normalize_dir data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data --attempt_refetch True
 ```

@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 import baostock as bs
 import fire
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -425,6 +426,19 @@ def _query_quarterly_dataframe(
     return _finalize_temporal_columns(df)
 
 
+def _comma_list(s: str) -> list[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _bs_symbol_from_qlib_code(instrument: str) -> str:
+    instrument = instrument.upper()
+    if instrument.startswith("SH") and len(instrument) >= 8:
+        return f"{instrument[2:]}.ss"
+    if instrument.startswith("SZ") and len(instrument) >= 8:
+        return f"{instrument[2:]}.sz"
+    raise ValueError(f"unsupported instrument code: {instrument!r}")
+
+
 # ----------------------------------------------------------------------
 # Collector / Normalize / Runner
 # ----------------------------------------------------------------------
@@ -718,6 +732,402 @@ class Run(BaseRun):
     @property
     def default_base_dir(self) -> Union[Path, str]:
         return BASE_DIR
+
+    def dump_qlib(
+        self,
+        qlib_dir: str = "data/qlib_data/cn_data",
+        instruments: str = "",
+        feature_prefix: str = "pit_",
+        freq: str = "day",
+        threads: int = 8,
+        dump_pit: bool = True,
+        dump_bin: bool = True,
+        attempt_refetch: bool = False,
+        overwrite_pit: bool = False,
+        limit: Optional[int] = None,
+    ) -> dict:
+        """
+        从 normalize_dir 的 PIT CSV 生成 Qlib：
+        - PIT 二进制格式：<qlib_dir>/financial/<inst>/*.data|*.index （dump_pit=True）
+        - 日频离线特征：<qlib_dir>/features/<inst>/<feature_prefix><field>.day.bin （dump_bin=True）
+
+        数据缺失处理：
+        - 若 financial/<inst>/ 不存在且 attempt_refetch=True，会尝试调用 Baostock 拉取并按 PitNormalizeN1 标准化后补齐（默认关闭，避免无意触发大量接口请求）；
+        - 若接口也没有数据，则该股票对应字段写全 NaN 的日频特征 bin。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import importlib
+        import subprocess
+
+        if isinstance(instruments, (list, tuple)):
+            instruments = ",".join(str(x) for x in instruments)
+
+        import qlib
+        from qlib.config import C
+        from qlib.constant import REG_CN
+        from qlib.data.data import Cal
+        from qlib.data.storage.file_storage import FileFeatureStorage
+        from qlib.utils import code_to_fname, fname_to_code
+
+        provider_uri = str(Path(qlib_dir).expanduser().resolve())
+        qlib.init(provider_uri=provider_uri, region=REG_CN)
+
+        full_cal = Cal.calendar(freq=freq)
+        if len(full_cal) == 0:
+            raise RuntimeError(f"empty calendar for freq={freq!r}")
+        cal_days = pd.DatetimeIndex(full_cal).values.astype("datetime64[D]")
+        start_index = 0
+
+        base = Path(provider_uri)
+        financial_root = base / "financial"
+
+        def _discover_instruments() -> list[str]:
+            if instruments.strip():
+                return _comma_list(instruments)
+
+            inst: set[str] = set()
+
+            normalize_root = Path(self.normalize_dir)
+            if normalize_root.exists():
+                for p in normalize_root.glob("*.csv"):
+                    try:
+                        inst.add(fname_to_code(p.stem.lower()))
+                    except Exception:
+                        continue
+            if financial_root.exists():
+                for p in financial_root.iterdir():
+                    if p.is_dir():
+                        inst.add(fname_to_code(p.name))
+            return sorted(inst)
+
+        def _discover_pit_fields() -> list[str]:
+            if financial_root.exists():
+                discovered = sorted({p.stem for p in financial_root.rglob("*.data")})
+                if discovered:
+                    return discovered
+            # Fallback: use the field definitions of this collector.
+            # Qlib financial storage uses "<field>_q.data" naming, so daily features become "pit_<field>_q".
+            return [f"{name}_q" for name in ALL_FIELD_NAMES]
+
+        inst_list = _discover_instruments()
+        if limit is not None:
+            inst_list = inst_list[: int(limit)]
+
+        dump_pit_path = (BASE_DIR.parent.parent / "scripts" / "dump_pit.py").resolve()
+        scripts_dir = dump_pit_path.parent
+
+        DumpPitData = None
+        if dump_pit or attempt_refetch:
+            if not dump_pit_path.exists():
+                raise FileNotFoundError(f"dump_pit.py not found: {dump_pit_path}")
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            dump_pit_mod = importlib.import_module("dump_pit")
+            DumpPitData = dump_pit_mod.DumpPitData
+
+        def _pit_paths(instrument: str, field: str) -> tuple[Path, Path]:
+            inst = code_to_fname(instrument).lower()
+            field = field.lower()
+            return (
+                base / "financial" / inst / f"{field}.index",
+                base / "financial" / inst / f"{field}.data",
+            )
+
+        def _load_pit_records(data_path: Path) -> np.ndarray:
+            data_records = [
+                ("date", C.pit_record_type["date"]),
+                ("period", C.pit_record_type["period"]),
+                ("value", C.pit_record_type["value"]),
+                ("_next", C.pit_record_type["index"]),
+            ]
+            arr = np.fromfile(str(data_path), dtype=data_records)
+            if arr.size == 0:
+                return arr
+            order = np.argsort(arr["date"], kind="mergesort")
+            return arr[order]
+
+        def _pit_last_period_value_events(records: np.ndarray) -> pd.Series:
+            if records.size == 0:
+                return pd.Series(dtype="float32")
+
+            dates = records["date"]
+            unique_dates = np.unique(dates)
+
+            current_period: int = -1
+            latest_value_by_period: dict[int, float] = {}
+            event_dates: list[pd.Timestamp] = []
+            event_values: list[float] = []
+
+            pos = 0
+            n = records.size
+            for d in unique_dates:
+                while pos < n and dates[pos] == d:
+                    period = int(records["period"][pos])
+                    if period > current_period:
+                        current_period = period
+                    latest_value_by_period[period] = float(records["value"][pos])
+                    pos += 1
+
+                di = int(d)
+                if di <= 0 or di < 19000101 or di > 21000101:
+                    continue
+                event_dates.append(pd.to_datetime(str(di), format="%Y%m%d"))
+                event_values.append(float(latest_value_by_period.get(current_period, np.nan)))
+
+            s = pd.Series(event_values, index=pd.DatetimeIndex(event_dates), dtype="float32")
+            return s.groupby(level=0).last().sort_index()
+
+        def _align_events_to_calendar_days(events: pd.Series) -> np.ndarray:
+            if len(cal_days) == 0:
+                return np.array([], dtype="float32")
+            if events.empty:
+                return np.full((len(cal_days),), np.nan, dtype="float32")
+
+            evt_days = events.index.values.astype("datetime64[D]")
+            evt_vals = events.to_numpy(dtype="float32", copy=False)
+
+            pos = np.searchsorted(evt_days, cal_days, side="right") - 1
+            out = np.full((len(cal_days),), np.nan, dtype="float32")
+            valid = pos >= 0
+            out[valid] = evt_vals[pos[valid]]
+            return out
+
+        def _write_daily_feature(*, instrument: str, field: str, values: np.ndarray) -> None:
+            instrument_fname = code_to_fname(instrument)
+            storage = FileFeatureStorage(instrument=instrument_fname, field=field, freq=freq)
+            storage.uri.parent.mkdir(parents=True, exist_ok=True)
+            if storage.uri.exists():
+                storage.uri.unlink()
+            storage.write(values, index=start_index)
+
+        def _backfill_financial_for_instrument(instrument: str) -> bool:
+            if not attempt_refetch or DumpPitData is None:
+                return False
+
+            try:
+                bs_symbol = _bs_symbol_from_qlib_code(instrument)
+            except Exception as exc:
+                logger.warning(f"skip refetch {instrument}: {exc}")
+                return False
+
+            start_date = str(full_cal[0].date())
+            end_date = str(full_cal[-1].date())
+
+            collector = PitCollectorN1(
+                save_dir=str(self.source_dir),
+                start=start_date,
+                end=end_date,
+                interval=PitCollectorN1.INTERVAL_QUARTERLY,
+                max_workers=1,
+                max_collector_count=1,
+                delay=0,
+                check_data_length=False,
+                limit_nums=None,
+                symbol_regex=None,
+            )
+            try:
+                raw_df = collector.get_data(
+                    bs_symbol,
+                    PitCollectorN1.INTERVAL_QUARTERLY,
+                    pd.Timestamp(start_date),
+                    pd.Timestamp(end_date),
+                )
+            except Exception as exc:
+                logger.warning(f"refetch {instrument} failed: {exc}")
+                return False
+
+            if raw_df is None or raw_df.empty:
+                return False
+
+            normalizer = PitNormalizeN1(interval=PitCollectorN1.INTERVAL_QUARTERLY)
+            norm_df = normalizer.normalize(raw_df)
+            if norm_df is None or norm_df.empty:
+                return False
+
+            inst_fname = code_to_fname(instrument).lower()
+            if "symbol" not in norm_df.columns:
+                norm_df = norm_df.copy()
+                norm_df["symbol"] = inst_fname
+            csv_path = Path(self.normalize_dir) / f"{inst_fname}.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if csv_path.exists():
+                    old = pd.read_csv(csv_path)
+                    norm_df = pd.concat([old, norm_df], ignore_index=True)
+                norm_df.to_csv(csv_path, index=False)
+            except Exception as exc:
+                logger.warning(f"failed to save normalized csv for {instrument}: {exc}")
+                return False
+
+            try:
+                dumper = DumpPitData(csv_path=str(csv_path), qlib_dir=provider_uri, max_workers=1)
+                dumper._dump_pit(str(csv_path), interval=PitCollectorN1.INTERVAL_QUARTERLY, overwrite=overwrite_pit)
+            except Exception as exc:
+                logger.warning(f"dump_pit for {instrument} failed: {exc}")
+                return False
+
+            return (financial_root / inst_fname).exists()
+
+        dump_pit_ok = True
+        if dump_pit and DumpPitData is not None:
+            logger.info(f"[stage] dump PIT financial -> {financial_root}")
+            try:
+                if instruments.strip():
+                    for inst in inst_list:
+                        inst_fname = code_to_fname(inst).lower()
+                        csv_path = Path(self.normalize_dir) / f"{inst_fname}.csv"
+                        if not csv_path.exists():
+                            continue
+                        dumper = DumpPitData(csv_path=str(csv_path), qlib_dir=provider_uri, max_workers=1)
+                        dumper._dump_pit(str(csv_path), interval=PitCollectorN1.INTERVAL_QUARTERLY, overwrite=overwrite_pit)
+                else:
+                    # Use a subprocess to run dump_pit.py so its internal ProcessPoolExecutor works on Windows.
+                    cmd = [
+                        sys.executable,
+                        str(dump_pit_path),
+                        "dump",
+                        "--csv_path",
+                        str(self.normalize_dir),
+                        "--qlib_dir",
+                        provider_uri,
+                        "--interval",
+                        PitCollectorN1.INTERVAL_QUARTERLY,
+                        "--max_workers",
+                        str(max(int(threads), 1)),
+                        f"--overwrite={bool(overwrite_pit)}",
+                    ]
+                    logger.info(f"[cmd] {' '.join(cmd)}")
+                    proc = subprocess.run(cmd, check=False)
+                    if proc.returncode != 0:
+                        dump_pit_ok = False
+                        logger.warning(f"dump_pit subprocess failed: returncode={proc.returncode}")
+            except Exception as exc:
+                dump_pit_ok = False
+                logger.warning(f"dump_pit batch failed: {exc}")
+
+        if attempt_refetch and DumpPitData is not None:
+            missing_inst = []
+            for inst in inst_list:
+                inst_dir = financial_root / code_to_fname(inst).lower()
+                if not inst_dir.exists():
+                    missing_inst.append(inst)
+            if missing_inst:
+                supported: list[str] = []
+                unsupported: list[str] = []
+                for inst in missing_inst:
+                    try:
+                        _bs_symbol_from_qlib_code(inst)
+                        supported.append(inst)
+                    except Exception:
+                        unsupported.append(inst)
+
+                def _fmt(xs: list[str], n: int = 20) -> str:
+                    if not xs:
+                        return "[]"
+                    head = ", ".join(xs[:n])
+                    more = f", ...(+{len(xs) - n})" if len(xs) > n else ""
+                    return f"[{head}{more}]"
+
+                logger.info(
+                    "[stage] refetch missing PIT instruments: "
+                    f"total={len(missing_inst)} supported={len(supported)} unsupported={len(unsupported)}"
+                )
+                logger.info(f"[plan] will refetch supported={_fmt(supported)}")
+                if unsupported:
+                    logger.info(f"[plan] unsupported (skip refetch)={_fmt(unsupported)}")
+                logger.info("[plan] after refetch, still-missing instruments will get NaN daily feature bins")
+
+                # If local PIT dump failed, avoid unintentionally sending thousands of API requests.
+                if not dump_pit_ok and len(supported) > 200:
+                    logger.warning(
+                        "[skip] dump_pit failed and missing set is large; skip refetch to avoid massive API requests. "
+                        "Fix PIT dump first or run with --instruments to narrow scope."
+                    )
+                    supported = []
+
+                for inst in supported:
+                    _backfill_financial_for_instrument(inst)
+
+        fields = _discover_pit_fields()
+
+        if not dump_bin:
+            return {
+                "instruments": len(inst_list),
+                "fields": len(fields),
+                "pit_dumped": int(bool(dump_pit)),
+                "bins_written": 0,
+            }
+
+        logger.info(f"[stage] dump PIT -> daily bins (instruments={len(inst_list)} fields={len(fields)} threads={threads})")
+        bins_written = 0
+        bins_nan = 0
+        bins_error = 0
+
+        def _dump_one(instrument: str) -> tuple[int, int, int]:
+            local_written = 0
+            local_nan = 0
+            local_error = 0
+            for f in fields:
+                out_field = f"{feature_prefix}{f}".lower()
+                _, data_path = _pit_paths(instrument, f)
+                try:
+                    if not data_path.exists():
+                        values = np.full((len(cal_days),), np.nan, dtype="float32")
+                        _write_daily_feature(instrument=instrument, field=out_field, values=values)
+                        local_written += 1
+                        local_nan += 1
+                        continue
+                    records = _load_pit_records(data_path)
+                    events = _pit_last_period_value_events(records)
+                    values = _align_events_to_calendar_days(events)
+                    _write_daily_feature(instrument=instrument, field=out_field, values=values)
+                    local_written += 1
+                except Exception:
+                    values = np.full((len(cal_days),), np.nan, dtype="float32")
+                    _write_daily_feature(instrument=instrument, field=out_field, values=values)
+                    local_written += 1
+                    local_nan += 1
+                    local_error += 1
+            return local_written, local_nan, local_error
+
+        with ThreadPoolExecutor(max_workers=max(int(threads), 1)) as ex:
+            futs = {ex.submit(_dump_one, inst): inst for inst in inst_list}
+            pbar = None
+            if tqdm is not None:
+                pbar = tqdm(
+                    total=len(inst_list),
+                    desc="PIT→day bins",
+                    unit="inst",
+                    dynamic_ncols=True,
+                    mininterval=0.5,
+                )
+            done = 0
+            try:
+                for fut in as_completed(futs):
+                    inst = futs[fut]
+                    w, n, e = fut.result()
+                    bins_written += w
+                    bins_nan += n
+                    bins_error += e
+
+                    done += 1
+                    if pbar is not None:
+                        pbar.set_postfix_str(inst)
+                        pbar.update(1)
+                    elif done % 100 == 0 or done == len(inst_list):
+                        logger.info(f"[progress] PIT→day bins {done}/{len(inst_list)} last={inst}")
+            finally:
+                if pbar is not None:
+                    pbar.close()
+
+        return {
+            "instruments": len(inst_list),
+            "fields": len(fields),
+            "pit_dumped": int(bool(dump_pit)),
+            "bins_written": bins_written,
+            "bins_filled_nan": bins_nan,
+            "bins_filled_nan_error": bins_error,
+        }
 
 
 if __name__ == "__main__":
