@@ -6,3 +6,4 @@ data/stock_data
 mlruns/
 logs/
 __pycache__/
+reports/
