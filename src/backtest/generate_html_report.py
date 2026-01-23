@@ -891,7 +891,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # pred_df 的列名可能是 score / pred / 0（取决于上游训练脚本怎么保存）。
     # 这里不强行改列名，只要与 label 对齐即可。
     pred_label = pd.concat([label_df, pred_df], axis=1, join="inner").sort_index()
-    model_figs = analysis_model.model_performance_graph(pred_label, show_notebook=False)
+    model_figs = []
+    try:
+        if pred_label.empty:
+            raise ValueError("pred_label is empty after aligning label and prediction")
+        model_figs = analysis_model.model_performance_graph(pred_label, show_notebook=False)
+    except Exception as exc:
+        # 覆盖率过低/分组样本为空时，Qlib 的某些图（如 group_return）会抛 `ValueError: df is empty`。
+        # 这类情况不应导致整个报告失败：回测本身仍然有效，保留回测/风险表并跳过模型图表即可。
+        print(f"[warn] skip model performance graphs due to error: {exc}")
     # 与 notebook 展示对齐：去掉 marker（notebook 里只处理了 report_graph 的 marker；
     # model_performance_graph 不做强制坐标轴格式化，避免影响直方图/热力图/QQ 图）。
     for fig in model_figs:
@@ -900,7 +908,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
     # plotly.js 只在第一组图里注入一次；这里关闭以避免重复。
-    model_html = _plotly_figs_to_html(model_figs, include_plotlyjs=False)
+    model_html = _plotly_figs_to_html(model_figs, include_plotlyjs=False) if model_figs else "<div class='note'>(model graphs skipped)</div>"
 
     # Portfolio Analysis Table：尽量把“组合分析”相关内容集中在一个 section 里展示。
     # - 风险指标（基于 excess return）

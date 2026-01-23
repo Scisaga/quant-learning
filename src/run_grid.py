@@ -94,15 +94,18 @@ def _benchmark_for_market(market: str) -> str:
     """
     给定 market 返回默认 benchmark。
 
-    注意：
-    - “all” 并不是一个严格指数成分集合，默认用 SH000300 作为基准；
-    - 若你有更合适的 benchmark（比如全市场用某个宽基），请用 --benchmark-map 覆盖。
+    默认规则（可被 --benchmark-map 覆盖）：
+    - csi300  → SH000300
+    - csi1000 → SH000852
+    - csiall / all（全市场）→ SH000985（中证全指）
     """
     market = market.lower()
     if market == "csi1000":
         return "SH000852"
     if market == "csi300":
         return "SH000300"
+    if market in {"csiall", "all"}:
+        return "SH000985"
     return "SH000300"
 
 
@@ -291,8 +294,6 @@ def _run_one_job(
     min_cost: float,
     limit_threshold: float,
     out_dir: Path,
-    pit_missing: str,
-    joblib_backend: str,
 ) -> JobResult:
     """
     执行单个 job：训练 -> 生成 HTML 报告。
@@ -333,11 +334,8 @@ def _run_one_job(
         f"{job.window.test_start},{job.window.test_end}",
         "--label-expr",
         job.label_expr,
-        "--joblib-backend",
-        joblib_backend,
     ]
     train_cmd.extend(job.pit.pit_fields_arg)
-    train_cmd.extend(["--pit-missing", pit_missing])
     if lgb_num_threads is not None:
         train_cmd.extend(["--lgb-num-threads", str(lgb_num_threads)])
 
@@ -998,18 +996,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--lgb-num-threads", type=int, default=None, help="override trainer `--lgb-num-threads` (default: trainer default)")
     p.add_argument(
-        "--joblib-backend",
-        choices=["threading", "loky", "multiprocessing"],
-        default="threading",
-        help="passed to trainer `--joblib-backend` (default: threading)",
-    )
-    p.add_argument(
-        "--pit-missing",
-        choices=["error", "skip"],
-        default="skip",
-        help="for PIT-enabled jobs: how to handle instruments missing PIT bins (default: skip)",
-    )
-    p.add_argument(
         "--python",
         default=None,
         help="python executable for subprocesses (default: use .venv/bin/python if exists, otherwise current python)",
@@ -1018,7 +1004,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Backtest/report params (kept constant for comparability).
     p.add_argument("--topk", type=int, default=10)
     p.add_argument("--n-drop", type=int, default=1)
-    p.add_argument("--hold-thresh", type=int, default=5)
+    p.add_argument(
+        "--hold-thresh",
+        type=int,
+        default=None,
+        help="最小持有天数；默认 None，表示自动与 label horizon 对齐（horizon h → hold_thresh=h）",
+    )
+    p.add_argument(
+        "--hold-thresh-mode",
+        choices=["auto", "fixed"],
+        default="auto",
+        help="auto: 按 label horizon 自动匹配 hold_thresh；fixed: 全部窗口使用 --hold-thresh 的固定值",
+    )
     p.add_argument("--account", type=float, default=100_000_000)
     p.add_argument("--open-cost", type=float, default=0.0005)
     p.add_argument("--close-cost", type=float, default=0.0015)
@@ -1053,6 +1050,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="only export compare CSV from an existing --out-dir (requires --out-dir, will NOT run jobs)",
     )
     args = p.parse_args(argv)
+
+    if args.hold_thresh_mode == "fixed" and args.hold_thresh is None:
+        raise SystemExit("--hold-thresh-mode=fixed 需要显式提供 --hold-thresh")
 
     # 文件移动到 src/ 后，repo_root 是它的上一级目录。
     repo_root = Path(__file__).resolve().parents[1]
@@ -1213,9 +1213,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "out_dir": str(out_dir),
         "workers": args.workers,
         "lgb_num_threads": args.lgb_num_threads,
+        "hold_thresh_mode": args.hold_thresh_mode,
+        "hold_thresh_default": args.hold_thresh,
         "python": python_exe,
-        "pit_missing": args.pit_missing,
-        "joblib_backend": args.joblib_backend,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -1261,6 +1261,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = []
         for job in todo:
+            job_hold_thresh = job.label_horizon if args.hold_thresh_mode == "auto" else args.hold_thresh
             futs.append(
                 ex.submit(
                     _run_one_job,
@@ -1271,15 +1272,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     lgb_num_threads=args.lgb_num_threads,
                     topk=args.topk,
                     n_drop=args.n_drop,
-                    hold_thresh=args.hold_thresh,
+                    hold_thresh=job_hold_thresh if job_hold_thresh is not None else job.label_horizon,
                     account=args.account,
                     open_cost=args.open_cost,
                     close_cost=args.close_cost,
                     min_cost=args.min_cost,
                     limit_threshold=args.limit_threshold,
                     out_dir=out_dir,
-                    pit_missing=args.pit_missing,
-                    joblib_backend=args.joblib_backend,
                 )
             )
 

@@ -75,7 +75,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--valid", default="2017-01-01,2018-12-31", help="valid start,end")
     parser.add_argument("--test", default="2019-01-01,2020-12-31", help="test start,end")
 
-    parser.add_argument("--label-expr", default="Ref($close, -1) / $close - 1")
+    parser.add_argument("--label-expr", default="Ref($close, -5) / $close - 1")
     parser.add_argument(
         "--pit-fields",
         nargs="?",
@@ -100,9 +100,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     qlib.init(provider_uri=args.provider_uri, region=REG_CN)
 
     pit_fields = _comma_list(args.pit_fields)
+    # 允许 pit_fields 为空：表示“无 PIT 特征”模式（供 run_grid 的 no_pit 分支使用）。
     pit_daily_fields = [f"{args.pit_feature_prefix}{f}" for f in pit_fields] if pit_fields else []
-    if not pit_fields:
-        raise ValueError("pit-fields is empty; this script requires precomputed PIT daily features.")
 
     pit_feature_fields = [f"${f}" for f in pit_daily_fields]
     pit_feature_names = [f.upper() for f in pit_daily_fields]
@@ -122,17 +121,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             flush=True,
         )
 
-        kept = _filter_instruments_by_feature_bins(
-            provider_uri=args.provider_uri, instruments=inst_list, daily_feature_fields=pit_daily_fields
+        kept = (
+            _filter_instruments_by_feature_bins(
+                provider_uri=args.provider_uri, instruments=inst_list, daily_feature_fields=pit_daily_fields
+            )
+            if pit_daily_fields
+            else inst_list
         )
-        if len(kept) != len(inst_list):
-            missing = [x for x in inst_list if x not in set(kept)]
+        if pit_daily_fields and len(kept) != len(inst_list):
+            kept_set = set(kept)
+            missing = [x for x in inst_list if x not in kept_set]
             example = ", ".join(missing[:10])
-            raise RuntimeError(
-                "PIT daily features are missing for some instruments. "
+            # 不因为少量标的缺 PIT bin 让整个窗口失败：打印 warning 继续训练。
+            # 这类缺失通常会在 DataHandler 的处理链（Fillna/DropnaLabel 等）中自然消化。
+            print(
+                "[warn] PIT daily features are missing for some instruments; will continue training. "
                 f"expected prefix={args.pit_feature_prefix!r} fields={pit_fields!r}; "
-                f"missing_count={len(missing)}/{len(inst_list)} example_missing=[{example}]. "
-                "Run src/scripts/dump_pit_daily_features.py first."
+                f"missing_count={len(missing)}/{len(inst_list)} example_missing=[{example}]",
+                flush=True,
             )
 
         instruments_for_handler = inst_list
@@ -191,8 +197,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "subsample": 0.8789,
                 "lambda_l1": 205.6999,
                 "lambda_l2": 580.9768,
-                "max_depth": 8,
-                "num_leaves": 400,
+                "max_depth": 16,
+                "num_leaves": 200,
                 "num_threads": 20,
             },
         }
