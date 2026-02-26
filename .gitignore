@@ -1,9 +1,10 @@
 .vscode/
-.venv/
+.venv311/
 .env
-data/qlib_data
-data/stock_data
+data/
 mlruns/
 logs/
 __pycache__/
 reports/
+data_2024/
+train_record/
