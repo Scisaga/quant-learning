@@ -62,7 +62,7 @@ def _filter_instruments_by_feature_bins(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Train LGBModel on Alpha158 (+ optional PIT financial features).")
-    parser.add_argument("--provider-uri", default="data/qlib_data/cn_data")
+    parser.add_argument("--provider-uri", default="data/qlib_bin")
     parser.add_argument("--market", default="csi300")
     parser.add_argument("--benchmark", default="SH000300")
     parser.add_argument("--exp-name", default="tutorial_exp")
@@ -87,6 +87,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--pit-feature-prefix",
         default="pit_",
         help="offline PIT daily feature prefix: $<prefix><field> (default: $pit_<field>)",
+    )
+    parser.add_argument(
+        "--lgb-num-threads",
+        type=int,
+        default=8,
+        help="LightGBM num_threads for parallel training (default: 8)",
     )
 
     args = parser.parse_args(argv)
@@ -191,14 +197,32 @@ def main(argv: Optional[list[str]] = None) -> int:
             "class": "LGBModel",
             "module_path": "qlib.contrib.model.gbdt",
             "kwargs": {
+                # ========== 损失函数 ==========
                 "loss": "mse",
+
+                # ========== 采样参数（增加随机性，防过拟合） ==========
                 "colsample_bytree": 0.8879,
+
+                # ========== 学习率（控制步长，避免震荡） ==========
                 "learning_rate": 0.0421,
+
+                # ========== 行采样率（减少样本间相关性） ==========
                 "subsample": 0.8789,
+
+                # ========== 正则化（控制模型复杂度） ==========
+                # L1 正则化：减少特征重要性，防止过拟合
                 "lambda_l1": 205.6999,
+
+                # L2 正则化：减少特征权重，防止过拟合
                 "lambda_l2": 580.9768,
+
+                # ========== 树结构参数（控制模型复杂度） ==========
                 "max_depth": 16,
+
+                # ========== 叶子节点数（控制模型复杂度） ==========
                 "num_leaves": 200,
+
+                # ========== 线程数（控制训练效率） ==========
                 "num_threads": 20,
             },
         }

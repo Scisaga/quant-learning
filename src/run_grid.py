@@ -293,6 +293,7 @@ def _run_one_job(
     close_cost: float,
     min_cost: float,
     limit_threshold: float,
+    strategy: str,
     out_dir: Path,
 ) -> JobResult:
     """
@@ -365,6 +366,8 @@ def _run_one_job(
         recorder_id,
         "--benchmark",
         job.benchmark,
+        "--strategy",
+        strategy,
         "--backtest-start",
         job.window.test_start,
         "--backtest-end",
@@ -950,7 +953,7 @@ def _export_compare_csv(*, repo_root: Path, out_dir: Path, results_path: Path, p
 
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Run a market/label/PIT/time walk-forward grid (train + HTML report) in parallel.")
-    p.add_argument("--provider-uri", default="data/qlib_data/cn_data")
+    p.add_argument("--provider-uri", default="data/qlib_bin")
     # 市场列表：直接透传给训练脚本里的 `D.instruments(market)`。
     # 常用：all / csi300 / csi1000
     p.add_argument("--markets", default="csi300,csi1000,csiall", help="comma-separated market names for D.instruments")
@@ -1021,6 +1024,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--close-cost", type=float, default=0.0015)
     p.add_argument("--min-cost", type=float, default=5.0)
     p.add_argument("--limit-threshold", type=float, default=0.095)
+    p.add_argument(
+        "--strategy",
+        choices=["topk_dropout", "stabilized"],
+        default="topk_dropout",
+        help="strategy used in backtest/report: topk_dropout (default) or stabilized",
+    )
 
     p.add_argument("--out-dir", default=None, help="default: reports/grid_runs/<timestamp>")
     # resume：基于 results.jsonl 中 status=ok 的 key 跳过；可用于断点续跑（比如中途机器重启）。
@@ -1278,6 +1287,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     close_cost=args.close_cost,
                     min_cost=args.min_cost,
                     limit_threshold=args.limit_threshold,
+                    strategy=args.strategy,
                     out_dir=out_dir,
                 )
             )

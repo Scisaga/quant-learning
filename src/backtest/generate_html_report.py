@@ -36,6 +36,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import sys as _sys
+
+
+# 确保项目 `src/` 根目录在 sys.path 中，便于通过 module_path 加载自定义策略（如 `backtest.strategy.StabilizedHoldingStrategy`）。
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT_STR = str(_SRC_ROOT)
+if _SRC_ROOT_STR not in _sys.path:
+    _sys.path.insert(0, _SRC_ROOT_STR)
+
 # 兼容性处理：部分 Qlib 依赖（尤其是 RL 相关）可能 import `gym`，而新环境里常用 `gymnasium`。
 # 这里把 gymnasium 注入到 sys.modules["gym"]，以避免导入时报错/警告。
 try:
@@ -696,6 +705,7 @@ def _render_experiment_params_html(
         (
             "Strategy",
             [
+                ("strategy.class", getattr(args, "strategy", "TopkDropoutStrategy")),
                 ("strategy.topk", args.topk),
                 ("strategy.n_drop", args.n_drop),
                 ("strategy.hold_thresh", args.hold_thresh),
@@ -721,8 +731,8 @@ def _render_experiment_params_html(
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Generate Qlib prediction/backtest/analysis HTML report from a trained recorder.")
 
-    # provider-uri：Qlib 数据目录（cn_data / us_data 等）。这里默认与你仓库的目录一致。
-    p.add_argument("--provider-uri", default="data/qlib_data/cn_data")
+    # provider-uri：Qlib 数据目录，须与训练脚本一致。默认与 train_lgb_alpha158_pit 对齐。
+    p.add_argument("--provider-uri", default="data/qlib_bin")
     # exp-name / recorder-id：训练时写入到 Qlib workflow 的 Experiment/Recorder。
     # 训练脚本（如 src/train/train_lgb_alpha158_pit.py）通常会打印 recorder_id。
     p.add_argument("--exp-name", default="tutorial_exp")
@@ -736,7 +746,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 若不传，则默认使用训练时保存到 recorder 的 label_expr（run_config.pkl）；再不行才回退到“未来 5 日收益率”。
     p.add_argument("--label-expr", default=None)
 
-    # 策略参数：TopkDropoutStrategy（与 notebook/示例保持一致）。
+    # 策略参数：默认 TopkDropoutStrategy；也支持自定义稳定持仓策略。
+    p.add_argument(
+        "--strategy",
+        choices=["topk_dropout", "stabilized"],
+        default="topk_dropout",
+        help="strategy used for backtest: topk_dropout (default) or stabilized",
+    )
     p.add_argument("--topk", type=int, default=10)
     p.add_argument("--n-drop", type=int, default=1)
     p.add_argument("--hold-thresh", type=int, default=5)
@@ -769,27 +785,55 @@ def main(argv: Optional[list[str]] = None) -> int:
     trained_model = _safe_load(recorder, "trained_model")
 
     # Prefer the training label_expr saved on the recorder, unless explicitly overridden by CLI.
+    run_config = _safe_load(recorder, "run_config.pkl") or _safe_load(recorder, "run_config")
+    run_config = run_config if isinstance(run_config, dict) else {}
     if args.label_expr is None:
-        run_config = _safe_load(recorder, "run_config.pkl") or _safe_load(recorder, "run_config")
-        if isinstance(run_config, dict):
-            saved = run_config.get("label_expr")
-            if isinstance(saved, str) and saved.strip():
-                args.label_expr = saved.strip()
+        saved = run_config.get("label_expr")
+        if isinstance(saved, str) and saved.strip():
+            args.label_expr = saved.strip()
     if args.label_expr is None:
         args.label_expr = "Ref($close, -5) / $close - 1"
 
     # 回测/持仓分析配置（Qlib 内部用 dict 表达）。
+    # 支持两类策略：
+    # - topk_dropout：原始 TopkDropoutStrategy
+    # - stabilized：自定义 StabilizedHoldingStrategy（稳定持仓 + 换手控制）
+    if args.strategy == "stabilized":
+        # 为保证断言 buy_buffer <= topk <= sell_buffer，按 topk 的比例自动设定 buffer。
+        buy_buffer = max(1, int(round(args.topk * 0.6)))
+        sell_buffer = max(args.topk, int(round(args.topk * 1.4)))
+        strategy_cfg = {
+            "class": "StabilizedHoldingStrategy",
+            "module_path": "backtest.strategy.StabilizedHoldingStrategy",
+            "kwargs": {
+                "signal": "<PRED>",
+                "topk": args.topk,
+                "buy_buffer": buy_buffer,
+                "sell_buffer": sell_buffer,
+                "min_holding_days": args.hold_thresh,
+                "ema_alpha": 0.3,
+                # risk_degree/only_tradable 使用类内部默认值（risk_degree=0.95, only_tradable=True）
+            },
+        }
+    else:
+        strategy_cfg = {
+            "class": "TopkDropoutStrategy",
+            "module_path": "qlib.contrib.strategy.signal_strategy",
+            "kwargs": {
+                "signal": "<PRED>",
+                "topk": args.topk,
+                "n_drop": args.n_drop,
+                "hold_thresh": args.hold_thresh,
+            },
+        }
+
     port_analysis_config = {
         "executor": {
             "class": "SimulatorExecutor",
             "module_path": "qlib.backtest.executor",
             "kwargs": {"time_per_step": "day", "generate_portfolio_metrics": True},
         },
-        "strategy": {
-            "class": "TopkDropoutStrategy",
-            "module_path": "qlib.contrib.strategy.signal_strategy",
-            "kwargs": {"signal": "<PRED>", "topk": args.topk, "n_drop": args.n_drop, "hold_thresh": args.hold_thresh},
-        },
+        "strategy": strategy_cfg,
         "backtest": {
             "start_time": args.backtest_start,
             "end_time": args.backtest_end,
@@ -805,6 +849,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             },
         },
     }
+
+    # 强制日频，避免 recorder 内其它配置或 Qlib 默认导致 1min。
+    port_analysis_config["executor"]["kwargs"]["time_per_step"] = "day"
+    port_analysis_config["backtest"]["exchange_kwargs"]["freq"] = "day"
+    if "inner_executor" in port_analysis_config["executor"].get("kwargs", {}):
+        del port_analysis_config["executor"]["kwargs"]["inner_executor"]
+
 
     # Ensure backtest + analysis artifacts exist on the recorder.
     # NOTE: do NOT use R.start(resume=True) on an existing recorder_id, because MLflow forbids overwriting params
