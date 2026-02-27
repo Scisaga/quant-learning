@@ -1,0 +1,62 @@
+
+# Collect Point-in-Time Data
+
+> *Please pay **ATTENTION** that the data is collected from [baostock](http://baostock.com) and the data might not be perfect. We recommend users to prepare their own data if they have high-quality dataset. For more information, users can refer to the [related document](https://qlib.readthedocs.io/en/latest/component/data.html#converting-csv-format-into-qlib-format)*
+
+## Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+## Collector Data
+
+
+### Download Quarterly CN Data
+
+```bash
+cd qlib/scripts/data_collector/pit/
+# download from baostock.com
+python collector.py download_data --source_dir ~/.qlib/stock_data/source/pit --start 2000-01-01 --end 2020-01-01 --interval quarterly
+```
+
+Downloading all data from the stock is very time-consuming. If you just want to run a quick test on a few stocks,  you can run the command below
+```bash
+python collector.py download_data --source_dir ~/.qlib/stock_data/source/pit --start 2000-01-01 --end 2020-01-01 --interval quarterly --symbol_regex "^(600519|000725).*"
+```
+
+
+### Normalize Data
+```bash
+python collector.py normalize_data --interval quarterly --source_dir ~/.qlib/stock_data/source/pit --normalize_dir ~/.qlib/stock_data/source/pit_normalized
+```
+
+
+
+### Dump Data into PIT Format
+
+```bash
+cd qlib/scripts
+python dump_pit.py dump --data_path ~/.qlib/stock_data/source/pit_normalized --qlib_dir ~/.qlib/qlib_data/cn_data --interval quarterly
+```
+
+## 命令示例
+
+```bash
+# 下载
+python backend/qlib/data_collector/pit/collector_n1.py download_data --source_dir data/stock_data/source/pit --start 2007-01-01 --end 2025-11-20 --interval quarterly
+
+python backend/qlib/data_collector/pit/collector_n1.py download_data --source_dir data/stock_data/source/pit --start 2007-01-01 --end 2025-11-20 --interval quarterly --symbol_regex '^(600519|000725).*'
+
+# 时间维度标准化 按照季度
+python backend/qlib/data_collector/pit/collector_n1.py normalize_data --interval quarterly --source_dir data/stock_data/source/pit --normalize_dir data/stock_data/source/pit_normalized
+
+# 导出PIT格式
+python backend/qlib/scripts/dump_pit.py dump --csv_path  data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data --interval quarterly
+
+# 同时导出 PIT(financial/) + PIT->day bin(features/)（默认会尝试用接口补全；仍缺失则写全 NaN 的日频特征 bin）
+python backend/qlib/data_collector/pit/collector_n1.py dump_qlib --normalize_dir data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data
+
+# 如需“缺失则自动调接口补全”，显式开启（否则不会发起接口请求）：
+python backend/qlib/data_collector/pit/collector_n1.py dump_qlib --normalize_dir data/stock_data/source/pit_normalized --qlib_dir data/qlib_data/cn_data --attempt_refetch True
+```

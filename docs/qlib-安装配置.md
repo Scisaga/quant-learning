@@ -25,11 +25,11 @@ pip install statsmodels
 数据缺失较多，且只更新到2020/09/25，不建议使用
 ```sh
 # 下载A股日线数据
-python src/get_data.py qlib_data --target_dir data/qlib_data/cn_data --region cn
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data --region cn
 # 下载A股分钟线数据
-python src/get_data.py qlib_data --target_dir data/qlib_data/cn_data_1min --region cn --interval 1min
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data_1min --region cn --interval 1min
 # 下载美股数据
-python src/get_data.py qlib_data --target_dir data/qlib_data/us_data --region us
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/us_data --region us
 ```
 
 ### 补充方法

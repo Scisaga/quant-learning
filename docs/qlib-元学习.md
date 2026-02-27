@@ -68,7 +68,7 @@ meta-information 的核心要求只有一个：**它应该能“描述任务/时
 Qlib 把 DDG-DA 实现为 **Meta Model** 的一个示例，抽象流程是：
 ① 构造 meta-information → ② 训练 MetaModel → ③ 推理得到 guidance（如权重）→ ④ 把 guidance 应用到基础预测模型训练。
 
-* 本仓库示例入口：`src/benchmarks_dynamic/DDG-DA/workflow.py`。
+* 本仓库示例入口：`backend/qlib/examples/benchmarks_dynamic/DDG-DA/workflow.py`。
 
 ---
 
@@ -80,18 +80,18 @@ Qlib 把 DDG-DA 实现为 **Meta Model** 的一个示例，抽象流程是：
 
 * 依赖：
   * 本仓库根目录 `requirements.txt` 里包含 `pyqlib==0.9.7`；
-  * DDG-DA 示例目录 `src/benchmarks_dynamic/DDG-DA/requirements.txt` 额外要求 `torch==1.10.0`（上游示例给的最小版本约束）。
+  * DDG-DA 示例目录 `backend/qlib/examples/benchmarks_dynamic/DDG-DA/requirements.txt` 额外要求 `torch==1.10.0`（上游示例给的最小版本约束）。
 * 数据：
   * 默认会下载 Qlib 公开数据到 `~/.qlib/qlib_data/cn_data`（入口脚本里调用 `qlib.tests.data.GetData().qlib_data(exists_skip=True)`）。
   * 或者你自行准备好数据，并通过环境变量 `PROVIDER_URI` 指向数据目录（入口脚本会把它透传给 `qlib.auto_init(provider_uri=...)`）。
-* 资源：`src/benchmarks_dynamic/DDG-DA/README.md` 提到该示例的最小硬件需求大约是内存 45G、磁盘 4G（CPU 也可跑）。
+* 资源：`backend/qlib/examples/benchmarks_dynamic/DDG-DA/README.md` 提到该示例的最小硬件需求大约是内存 45G、磁盘 4G（CPU 也可跑）。
 
 ### 1）选择配置（决定数据/模型/时间段）
 
 DDG-DA 示例默认使用滚动训练基线目录下的配置文件：
 
-* Linear：`src/benchmarks_dynamic/baseline/workflow_config_linear_Alpha158.yaml`
-* LightGBM：`src/benchmarks_dynamic/baseline/workflow_config_lightgbm_Alpha158.yaml`
+* Linear：`backend/qlib/examples/benchmarks_dynamic/baseline/workflow_config_linear_Alpha158.yaml`
+* LightGBM：`backend/qlib/examples/benchmarks_dynamic/baseline/workflow_config_lightgbm_Alpha158.yaml`
 
 这些 YAML 里最关键的是：
 
@@ -106,24 +106,24 @@ DDG-DA 示例默认使用滚动训练基线目录下的配置文件：
 * 在示例目录运行：
 
 ```bash
-cd src/benchmarks_dynamic/DDG-DA
+cd backend/qlib/examples/benchmarks_dynamic/DDG-DA
 python workflow.py run
 ```
 
 * 在仓库根目录运行：
 
 ```bash
-python src/benchmarks_dynamic/DDG-DA/workflow.py run
+python backend/qlib/examples/benchmarks_dynamic/DDG-DA/workflow.py run
 ```
 
 * 切换基础预测模型（LightGBM）：
 
 ```bash
-cd src/benchmarks_dynamic/DDG-DA
+cd backend/qlib/examples/benchmarks_dynamic/DDG-DA
 python workflow.py --conf_path=../baseline/workflow_config_lightgbm_Alpha158.yaml run
 ```
 
-入口脚本 `src/benchmarks_dynamic/DDG-DA/workflow.py` 的行为可以直接确认：
+入口脚本 `backend/qlib/examples/benchmarks_dynamic/DDG-DA/workflow.py` 的行为可以直接确认：
 
 1. 若未设置 `PROVIDER_URI`：尝试下载 Qlib 数据（存在则跳过）。
 2. 调用 `qlib.auto_init(...)` 初始化 Qlib。
@@ -141,7 +141,7 @@ Qlib 里 `DDGDA.run()` 明确按下面顺序执行（并在 `working_dir` 下落
 
 * 从 `basic_task()` 拿到基础任务配置（来自 YAML），并根据 `sim_task_model`（默认 `gbdt`）调整任务（例如用 GBDT 做特征重要性/相似度；或用 linear 并补上预处理）。
 * 从数据集准备出 `feature/label`，可选按特征重要性取 Top-N（`fea_imp_n`）。
-* 落盘产物（默认在 `src/benchmarks_dynamic/DDG-DA/`）：
+* 落盘产物（默认在 `backend/qlib/examples/benchmarks_dynamic/DDG-DA/`）：
   * `fea_label_df.pkl`：拼好的特征/标签数据
   * `handler_proxy.pkl`：一个 `DataHandlerLP`（StaticDataLoader）形式的 handler，后续构造 meta tasks 会用到
 

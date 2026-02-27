@@ -104,7 +104,7 @@ data/qlib_data/cn_data/
 
 如果你只是想跑通研究/回测，本仓库已经准备了 `data/qlib_data/*`，可以直接跳到下一节初始化。
 
-如果你要**下载示例数据**或**把自己的 CSV/Parquet 转成 Qlib .bin**，本仓库在 `src/scripts/` 下提供了一套脚本（多数来自 Qlib 官方实现并用 `fire` 封装）。
+如果你要**下载示例数据**或**把自己的 CSV/Parquet 转成 Qlib .bin**，本仓库在 `backend/qlib/scripts/` 下提供了一套脚本（多数来自 Qlib 官方实现并用 `fire` 封装）。
 
 ### 4.1 下载示例数据（CN/US、日频/分钟）
 
@@ -112,13 +112,13 @@ data/qlib_data/cn_data/
 
 ```bash
 # CN 日频
-python src/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data --region cn
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data --region cn
 
 # CN 1min（可选）
-python src/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data_1min --region cn --interval 1min
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/cn_data_1min --region cn --interval 1min
 
 # US 日频
-python src/scripts/get_data.py qlib_data --target_dir data/qlib_data/us_data --region us
+python backend/qlib/scripts/get_data.py qlib_data --target_dir data/qlib_data/us_data --region us
 ```
 
 > 说明：示例数据属于“公开样例”，更新频率与完整性取决于上游；如果你需要更完整/更高频/更新更及时的数据，通常需要接入自己的数据源并走 dump 流程。
@@ -128,7 +128,7 @@ python src/scripts/get_data.py qlib_data --target_dir data/qlib_data/us_data --r
 你可以把外部数据文件（按标的拆分的 `.csv` 或 `.parquet`）dump 到一个新的 `provider_uri` 目录：
 
 ```bash
-python src/scripts/dump_bin.py dump_all --data_path data/stock_data --qlib_dir data/qlib_data/my_data --date_field_name date --symbol_field_name symbol --include_fields open,high,low,close,volume,factor --freq day
+python backend/qlib/scripts/dump_bin.py dump_all --data_path data/stock_data --qlib_dir data/qlib_data/my_data --date_field_name date --symbol_field_name symbol --include_fields open,high,low,close,volume,factor --freq day
 ```
 
 关键约定（非常重要）：
@@ -142,14 +142,14 @@ python src/scripts/dump_bin.py dump_all --data_path data/stock_data --qlib_dir d
 dump 后建议先做一次快速体检：
 
 ```bash
-python src/scripts/check_data_health.py --qlib_dir data/qlib_data/my_data --freq day
+python backend/qlib/scripts/check_data_health.py --qlib_dir data/qlib_data/my_data --freq day
 ```
 
 脚本会检查：OHLCV 字段缺失、缺失值数量、异常跳变（价格/成交量）、`factor` 缺失等。
 
 ### 4.4 PIT 与财务数据（可选，高阶）
 
-如果你使用财务/公告类数据，建议引入 PIT（Point-In-Time）思想：**在每个交易日只能看到当时已公开的数据**，避免把未来披露的信息泄漏到历史训练集。本仓库提供了 `src/scripts/dump_pit.py` 用于构建 PIT 版本的数据（具体字段与口径需结合你的数据源设计）。
+如果你使用财务/公告类数据，建议引入 PIT（Point-In-Time）思想：**在每个交易日只能看到当时已公开的数据**，避免把未来披露的信息泄漏到历史训练集。本仓库提供了 `backend/qlib/scripts/dump_pit.py` 用于构建 PIT 版本的数据（具体字段与口径需结合你的数据源设计）。
 
 ## 5. 初始化与最小可用查询（Data API）
 

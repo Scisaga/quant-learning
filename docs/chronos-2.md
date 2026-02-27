@@ -420,13 +420,13 @@ PoC 阶段建议：
 
 [代码实现对照（本仓库）]
 
-- 特征与 regime：`src/chronos/qchronos/features.py`
-- 分位数后处理（区间/概率/score）：`src/chronos/qchronos/postprocess.py`
-- 静态/动态门控：`src/chronos/qchronos/gating.py`
-- 校准（区间 conformal / 概率 isotonic/Platt）：`src/chronos/qchronos/calibration.py`
-- Qlib 导出（pred_df/label_df）：`src/chronos/qchronos/qlib_adapter.py`
-- Chronos-2 推理包装（可选依赖）：`src/chronos/qchronos/chronos2_infer.py`
-- 脚本与自检：`src/chronos/scripts/`
+- 特征与 regime：`backend/qlib/chronos/qchronos/features.py`
+- 分位数后处理（区间/概率/score）：`backend/qlib/chronos/qchronos/postprocess.py`
+- 静态/动态门控：`backend/qlib/chronos/qchronos/gating.py`
+- 校准（区间 conformal / 概率 isotonic/Platt）：`backend/qlib/chronos/qchronos/calibration.py`
+- Qlib 导出（pred_df/label_df）：`backend/qlib/chronos/qchronos/qlib_adapter.py`
+- Chronos-2 推理包装（可选依赖）：`backend/qlib/chronos/qchronos/chronos2_infer.py`
+- 脚本与自检：`backend/qlib/chronos/scripts/`
 
 [hf-chronos2-readme]: https://huggingface.co/amazon/chronos-2/raw/main/README.md "amazon/chronos-2 README"
 [arxiv-chronos2]: https://arxiv.org/abs/2510.15821 "Chronos-2: From Univariate to Universal Forecasting"

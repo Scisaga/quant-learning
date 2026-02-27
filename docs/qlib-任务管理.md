@@ -1,4 +1,4 @@
-﻿## 任务管理（Task Management）
+## 任务管理（Task Management）
 
 任务管理是 Qlib Workflow 的“批量编排层”。当你不再只跑一次 `qrun` 或一次训练脚本，而是要做：
 
@@ -65,7 +65,7 @@
 - `dataset`：数据集与切片（`DatasetH` + `segments={train/valid/test}`）
 - `record`：记录哪些产物与评估（`SignalRecord`、`SigAnaRecord`、`PortAnaRecord` 等）
 
-> 本仓库的单次训练脚本 `src/train/train_lgb_alpha158_pit.py` 就是一个“任务配置落地成 Python”的例子：
+> 本仓库的单次训练脚本 `backend/qlib/train/train_lgb_alpha158_pit.py` 就是一个“任务配置落地成 Python”的例子：
 > - `market/instruments`：`--market csi300`
 > - `segments`：`--train/--valid/--test`
 > - `label`：`--label-expr`
@@ -101,13 +101,13 @@ C["mongo"] = {
 1) 用脚本跑一次训练：
 
 ```bash
-python src/train/train_lgb_alpha158_pit.py --provider-uri data/qlib_data/cn_data --market csi300 --exp-name tutorial_exp
+python backend/qlib/train/train_lgb_alpha158_pit.py --provider-uri data/qlib_data/cn_data --market csi300 --exp-name tutorial_exp
 ```
 
 2) 生成 HTML 报告（基于 Recorder/MLflow artifacts）：
 
 ```bash
-python src/backtest/generate_html_report.py --exp-name tutorial_exp --recorder-id <RID>
+python backend/qlib/backtest/generate_html_report.py --exp-name tutorial_exp --recorder-id <RID>
 ```
 
 你会在 `mlruns/` 看到一次 run 的完整产物（见 `docs/qlib-数据项.md`）。
@@ -175,8 +175,8 @@ python src/backtest/generate_html_report.py --exp-name tutorial_exp --recorder-i
 
 ### 8) 与本仓库内容的关联
 
-- 单次训练/写入 Recorder：`src/train/train_lgb_alpha158_pit.py`
-- 报告生成（含实验参数汇总）：`src/backtest/generate_html_report.py`
+- 单次训练/写入 Recorder：`backend/qlib/train/train_lgb_alpha158_pit.py`
+- 报告生成（含实验参数汇总）：`backend/qlib/backtest/generate_html_report.py`
 - 数据/产物解释：`docs/qlib-数据项.md`
 - 工作流（qrun/YAML）：`docs/qlib-工作流.md`
 - 回测与投组：`docs/qlib-投组管理与回测.md`
